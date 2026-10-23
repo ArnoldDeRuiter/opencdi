@@ -1529,33 +1529,38 @@ fn process_macroblock(
     let mut si = si0 as usize;
     let mut di = di0 as usize;
     let scan = dw - block_size;
+    let rows = s.len() / dw;
     for _y in 0..block_size {
         for _x in 0..block_size {
+            // Half-pel neighbours past the picture edge repeat the edge sample.
+            let below = if si / dw + 1 < rows { dw } else { 0 };
+            let right = usize::from(si % dw + 1 < dw);
+            let (s01, s10, s11) = (si + right, si + below, si + below + right);
             let val: i32 = match (interpolate, odd_h, odd_v) {
                 (false, false, false) => s[si] as i32,
-                (false, false, true) => (s[si] as i32 + s[si + dw] as i32 + 1) >> 1,
-                (false, true, false) => (s[si] as i32 + s[si + 1] as i32 + 1) >> 1,
+                (false, false, true) => (s[si] as i32 + s[s10] as i32 + 1) >> 1,
+                (false, true, false) => (s[si] as i32 + s[s01] as i32 + 1) >> 1,
                 (false, true, true) => {
                     (s[si] as i32
-                        + s[si + 1] as i32
-                        + s[si + dw] as i32
-                        + s[si + dw + 1] as i32
+                        + s[s01] as i32
+                        + s[s10] as i32
+                        + s[s11] as i32
                         + 2)
                         >> 2
                 }
                 (true, false, false) => (d[di] as i32 + s[si] as i32 + 1) >> 1,
                 (true, false, true) => {
-                    (d[di] as i32 + ((s[si] as i32 + s[si + dw] as i32 + 1) >> 1) + 1) >> 1
+                    (d[di] as i32 + ((s[si] as i32 + s[s10] as i32 + 1) >> 1) + 1) >> 1
                 }
                 (true, true, false) => {
-                    (d[di] as i32 + ((s[si] as i32 + s[si + 1] as i32 + 1) >> 1) + 1) >> 1
+                    (d[di] as i32 + ((s[si] as i32 + s[s01] as i32 + 1) >> 1) + 1) >> 1
                 }
                 (true, true, true) => {
                     (d[di] as i32
                         + ((s[si] as i32
-                            + s[si + 1] as i32
-                            + s[si + dw] as i32
-                            + s[si + dw + 1] as i32
+                            + s[s01] as i32
+                            + s[s10] as i32
+                            + s[s11] as i32
                             + 2)
                             >> 2)
                         + 1)
@@ -1675,3 +1680,19 @@ impl Frame {
     }
 }
 
+
+#[cfg(test)]
+mod edge_mc_tests {
+    use super::process_macroblock;
+
+    #[test]
+    fn half_pel_at_bottom_right_edge_repeats_edge_sample() {
+        // 2x2 macroblocks of 16x16 luma; vector points to the last block with +1/2 pel both ways.
+        let dw = 32;
+        let s: Vec<u8> = (0..dw * dw).map(|i| (i % 251) as u8).collect();
+        let mut d = vec![0u8; dw * dw];
+        process_macroblock(&s, &mut d, 1, 1, 2, 2, 1, 1, 16, false);
+        let last = dw * dw - 1;
+        assert_eq!(d[last], s[last]);
+    }
+}

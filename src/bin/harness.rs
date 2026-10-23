@@ -1,4 +1,3 @@
-use m68k::AddressBus;
 use opencdi::input_script::{self, Event, Player};
 use opencdi::machine::Machine;
 use opencdi::mcd212::{VideoMode, SCREEN_HEIGHT, SCREEN_WIDTH};
@@ -108,10 +107,10 @@ fn main() {
         if autoplay && m.bus.cdrom.is_some() && !disc_launched {
             let (bus, cpu) = (&mut m.bus, &m.cpu);
             let shell_state = if bus.dvc.is_fitted() {
-                let s = bus.read_long(0x00D08090u32.wrapping_add(0xFFFF9172));
-                if s >= 2 { s } else { bus.read_long(0x0000C000u32.wrapping_add(0xFFFF9172)) }
+                let s = bus.peek_long(0x00D08090u32.wrapping_add(0xFFFF9172)).unwrap_or(0);
+                if s >= 2 { s } else { bus.peek_long(0x0000C000u32.wrapping_add(0xFFFF9172)).unwrap_or(0) }
             } else {
-                bus.read_long(0x0000C000u32.wrapping_add(0xFFFF9172))
+                bus.peek_long(0x0000C000u32.wrapping_add(0xFFFF9172)).unwrap_or(0)
             };
             if shell_state >= 2 {
                 shell_ready_count += 1;

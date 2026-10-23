@@ -1134,6 +1134,8 @@ impl App {
         self.image_rect = image_rect(dw, dh);
         if let Ok(mut buffer) = surface.buffer_mut() {
             blit_aspect(&mut buffer, dw, dh, &self.m.bus.mcd212.framebuffer[..], self.image_rect);
+            // Wayland: ties the next redraw to a frame callback, so a hidden window is never presented to
+            window.pre_present_notify();
             let _ = buffer.present();
         }
     }

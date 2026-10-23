@@ -4,7 +4,7 @@ pub mod cdic;
 pub mod cdrom;
 pub mod dma;
 pub mod dvc;
-#[cfg(windows)]
+#[cfg(all(windows, feature = "host"))]
 pub mod gui;
 pub mod machine;
 pub mod mcd212;

@@ -53,3 +53,10 @@ oxideav-mp2 = "0.0.10"
 
 [patch.crates-io]
 m68k = { path = "crates/m68k" }
+
+# The libretro core relies on catch_unwind at every extern "C" entry; keep unwinding on.
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"

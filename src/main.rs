@@ -545,11 +545,7 @@ impl App {
 
     fn open_dialog_action(&self, open_and_reset: bool) {
         #[cfg(target_os = "windows")]
-        {
-            if let Some(path) = gui::open_file_dialog(self.hwnd()) {
-                push_action(if open_and_reset { GuiAction::OpenDisc(path) } else { GuiAction::InsertDisc(path) });
-            }
-        }
+        gui::post_menu_command(self.hwnd(), if open_and_reset { gui::ID_FILE_OPEN } else { gui::ID_FILE_INSERT });
         #[cfg(not(target_os = "windows"))]
         {
             let _ = open_and_reset;
@@ -767,11 +763,11 @@ impl App {
                 }
                 GuiAction::ShowHelp => {
                     #[cfg(target_os = "windows")]
-                    gui::show_controls_dialog(self.hwnd());
+                    gui::post_menu_command(self.hwnd(), gui::ID_HELP_CONTROLS);
                 }
                 GuiAction::ShowAbout => {
                     #[cfg(target_os = "windows")]
-                    gui::show_about_dialog(self.hwnd());
+                    gui::post_menu_command(self.hwnd(), gui::ID_HELP_ABOUT);
                 }
             }
         }

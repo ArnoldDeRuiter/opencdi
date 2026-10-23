@@ -94,6 +94,7 @@ unsafe extern "system" {
     fn MessageBoxW(hwnd: *mut std::ffi::c_void, lptext: *const u16, lpcaption: *const u16, utype: u32) -> i32;
     fn SetWindowLongPtrW(hwnd: *mut std::ffi::c_void, nindex: i32, dwnewlong: isize) -> isize;
     fn CallWindowProcW(prev: isize, hwnd: *mut std::ffi::c_void, msg: u32, wparam: usize, lparam: isize) -> isize;
+    fn PostMessageW(hwnd: *mut std::ffi::c_void, msg: u32, wparam: usize, lparam: isize) -> i32;
 }
 
 #[link(name = "comdlg32")]
@@ -340,6 +341,15 @@ unsafe extern "system" fn custom_wndproc(
     }
 }
 
+// Queue a menu command so its modal dialog runs from the window procedure, outside winit's event handler
+pub fn post_menu_command(hwnd: *mut std::ffi::c_void, menu_id: usize) {
+    if !hwnd.is_null() {
+        unsafe {
+            PostMessageW(hwnd, WM_COMMAND, menu_id, 0);
+        }
+    }
+}
+
 pub fn attach_gui_menu(
     hwnd: *mut std::ffi::c_void,
     current_profile: InputProfile,
@@ -365,9 +375,9 @@ pub fn attach_gui_menu(
         AppendMenuW(file_menu, MF_STRING, ID_FILE_OPEN, to_wide("Open Disc & Restart Console...\tCtrl+O").as_ptr());
         AppendMenuW(file_menu, MF_STRING, ID_FILE_EJECT, to_wide("Eject Disc").as_ptr());
         AppendMenuW(file_menu, MF_SEPARATOR, 0, std::ptr::null());
-        AppendMenuW(file_menu, MF_STRING, ID_FILE_RESET, to_wide("Restart Console (Reset)\tF5").as_ptr());
+        AppendMenuW(file_menu, MF_STRING, ID_FILE_RESET, to_wide("Restart Console (Reset)\tF5 / H").as_ptr());
         AppendMenuW(file_menu, MF_SEPARATOR, 0, std::ptr::null());
-        AppendMenuW(file_menu, MF_STRING, ID_FILE_EXIT, to_wide("Exit\tAlt+F4").as_ptr());
+        AppendMenuW(file_menu, MF_STRING, ID_FILE_EXIT, to_wide("Exit\tEsc").as_ptr());
         AppendMenuW(main_menu, MF_POPUP, file_menu as usize, to_wide("File").as_ptr());
 
         // 2. Controls Menu
@@ -400,7 +410,7 @@ pub fn attach_gui_menu(
 
         // 4. Video Menu
         let video_menu = CreatePopupMenu();
-        AppendMenuW(video_menu, MF_STRING, ID_VIDEO_FULLSCREEN, to_wide("Fullscreen\tF11").as_ptr());
+        AppendMenuW(video_menu, MF_STRING, ID_VIDEO_FULLSCREEN, to_wide("Fullscreen\tF11 / Alt+Enter").as_ptr());
         AppendMenuW(video_menu, MF_STRING, ID_VIDEO_SCREENSHOT, to_wide("Save Screenshot\tF12").as_ptr());
         AppendMenuW(video_menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(video_menu, MF_STRING, ID_VIDEO_PAL, to_wide("PAL (50 Hz) [CD-i 220 Standard]").as_ptr());
@@ -495,12 +505,14 @@ pub fn show_controls_dialog(owner: *mut std::ffi::c_void) {
            • Button B / Circle / X = Button 2\n\
            • Start Button = Action / Pause\n\n\
         KEYBOARD SHORTCUTS:\n\
-           • F12: Save Screenshot\n\
-           • Ctrl+O: Open disc image (CHD / ISO / BIN)\n\
-           • F5: Restart console (Reset)\n\
-           • F11: Fullscreen\n\
-           • M: Mute / Unmute audio\n\
-           • + / - : Adjust volume"
+           • F11 or Alt+Enter: Fullscreen\n\
+           • F5 or H: Restart console (Reset)\n\
+           • P: Pause  |  Space (hold): Fast-forward\n\
+           • F8: Screenshot (PPM)  |  F12: Screenshot (BMP)\n\
+           • F2 / F4: Save / Load state  |  F6 / F7: State slot (not implemented yet)\n\
+           • Ctrl+I: Insert disc  |  Ctrl+O: Open disc image and restart\n\
+           • M: Mute / Unmute audio  |  + / - : Adjust volume\n\
+           • Esc: Quit"
     );
     let title = to_wide("OpenCDi - Controls & Key Mapping Guide");
     unsafe {
@@ -512,7 +524,7 @@ pub fn show_about_dialog(owner: *mut std::ffi::c_void) {
     let text = to_wide(
         "OpenCDi - Philips CD-i Emulator\n\
         Version: 0.1.6 (High Performance Edition)\n\
-        Built with Rust & MiniFB\n\n\
+        Built with Rust, winit & softbuffer\n\n\
         Key Emulation Features:\n\
         • Philips SCC68070 Microprocessor & OS-9 CD-RTOS kernel\n\
         • Philips MCD-212 Video Display Controller (Planes A & B, ICA/DCA display lists)\n\

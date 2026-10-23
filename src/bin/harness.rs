@@ -41,7 +41,7 @@ fn dump_ppm(fb: &[u32], path: &str) {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: harness <bios.rom> <disc|none> <frames> [--dvc <rom>] [--ppm <out.ppm>] [--ntsc] [--autoplay [--print-autoplay-script]] [--input <script|@file>] [--sample <n>]");
+    eprintln!("usage: harness <bios.rom> <disc|none> <frames> [--dvc <rom>] [--ppm <out.ppm>] [--ntsc] [--autoplay [--print-autoplay-script]] [--input <script|@file>] [--sample <n> [--sample-audio]] [--dump-every <n> <prefix>]");
     std::process::exit(2);
 }
 
@@ -59,6 +59,8 @@ fn main() {
     let mut print_script = false;
     let mut input: Option<String> = None;
     let mut sample = 0u64;
+    let mut sample_audio = false;
+    let mut dump: Option<(u64, String)> = None;
     let mut i = 4;
     while i < a.len() {
         match a[i].as_str() {
@@ -69,11 +71,17 @@ fn main() {
             "--print-autoplay-script" => print_script = true,
             "--input" => { i += 1; input = Some(a.get(i).cloned().unwrap_or_else(|| usage())); }
             "--sample" => { i += 1; sample = a.get(i).and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()); }
+            "--sample-audio" => sample_audio = true,
+            "--dump-every" => {
+                let n = a.get(i + 1).and_then(|s| s.parse().ok()).filter(|&n: &u64| n > 0).unwrap_or_else(|| usage());
+                dump = Some((n, a.get(i + 2).cloned().unwrap_or_else(|| usage())));
+                i += 2;
+            }
             _ => usage(),
         }
         i += 1;
     }
-    if (print_script && !autoplay) || (autoplay && input.is_some()) {
+    if (print_script && !autoplay) || (autoplay && input.is_some()) || (sample_audio && sample == 0) {
         usage();
     }
     let mut player = input.map(|s| {
@@ -102,6 +110,7 @@ fn main() {
     let mut disc_launched = false;
     let mut shell_ready_count = 0u32;
     let mut audio_buf: Vec<(f32, f32)> = Vec::new();
+    let (mut win_samples, mut win_nonzero) = (0u64, 0u64);
 
     for frame in 0..frames {
         if autoplay && m.bus.cdrom.is_some() && !disc_launched {
@@ -145,9 +154,22 @@ fn main() {
 
         video_all = video_hash(video_all, m.framebuffer());
         drain_audio(&mut m, &mut audio_buf, &mut audio_all, &mut audio_samples);
+        if sample_audio {
+            win_samples += audio_buf.len() as u64;
+            win_nonzero += audio_buf.iter().filter(|&&(l, r)| l != 0.0 || r != 0.0).count() as u64;
+        }
         if sample > 0 && (frame + 1) % sample == 0 {
             let nb = m.framebuffer().iter().filter(|&&p| p & 0x00FF_FFFF != 0).count();
             eprintln!("SAMPLE frame={} nonblack={}", frame + 1, nb);
+            if sample_audio {
+                eprintln!("AUDIO frame={} samples={} nonzero={}", frame + 1, win_samples, win_nonzero);
+                (win_samples, win_nonzero) = (0, 0);
+            }
+        }
+        if let Some((n, prefix)) = &dump {
+            if (frame + 1) % n == 0 {
+                dump_ppm(m.framebuffer(), &format!("{}-{:05}.ppm", prefix, frame + 1));
+            }
         }
     }
 

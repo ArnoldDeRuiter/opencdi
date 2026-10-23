@@ -240,14 +240,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("=== OpenCDi - Philips CD-i Emulator ===");
 
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let has_flag = |f: &str| args.iter().any(|a| a == f);
+    let flag_value = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).cloned();
+    let rom_arg = flag_value("--rom").map(PathBuf::from);
+    let max_frames: Option<u64> = flag_value("--frames").and_then(|s| s.parse().ok());
+
     let mut m = Machine::new();
-    m.bus.slave.debug_log = std::env::args().any(|a| a == "--slave-debug");
+    m.bus.slave.debug_log = has_flag("--slave-debug");
     if m.bus.slave.debug_log {
         info!("Debug Slave XBUS abilitato (--slave-debug): log byte CH0 (mouse)");
     }
 
     // 1. Load BIOS ROM
-    let bios_path = match find_bios_rom() {
+    let bios_path = match rom_arg.or_else(find_bios_rom) {
         Some(path) => path,
         None => {
             let error_msg =
@@ -262,7 +268,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                   • cdi220.rom, cdi200.rom, cdi490a.rom\n\n\
                 Where to place the BIOS ROM:\n\
                   1. In a 'bios/' subfolder next to opencdi.exe\n\
-                  2. OR directly in the same folder as opencdi.exe\n\n\
+                  2. OR directly in the same folder as opencdi.exe\n\
+                  3. OR pass it on the command line: --rom <path>\n\n\
                 Digital Video Cartridge (DVC) for MPEG / FMV games:\n\
                   • Place 'vmpega.rom' (256 KB) in 'dvc/', 'bios/', or next to opencdi.exe.";
 
@@ -299,7 +306,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 2b. Load DVC ROM (Digital Video Cartridge) by default if present
-    let dvc_disabled = std::env::args().any(|a| a == "--no-dvc" || a == "--nodvc");
+    let dvc_disabled = has_flag("--no-dvc") || has_flag("--nodvc");
     if !dvc_disabled {
         if let Some(dvc_path) = find_dvc_rom() {
             if let Ok(_) = m.bus.load_dvc_rom(&dvc_path) {
@@ -314,15 +321,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Optional Game Disc (from command line argument, or None for standalone BIOS)
     let mut current_game_name = "No disc inserted (Standalone BIOS)".to_string();
-    let initial_disc = std::env::args().nth(1).and_then(|a| {
-        if a == "--bios" || a == "--standalone" || a == "--no-dvc" || a == "--nodvc" || a == "--slave-debug" {
-            None
-        } else {
-            find_file(&a).or_else(|| {
-                let p = PathBuf::from(&a);
-                if p.exists() { Some(p) } else { None }
-            })
+    // Disc = first positional argument (skipping flag values); --bios / --standalone force no disc
+    let standalone = has_flag("--bios") || has_flag("--standalone");
+    let mut disc_arg = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--rom" || a == "--frames" {
+            it.next();
+        } else if !a.starts_with("--") {
+            disc_arg = Some(a.clone());
+            break;
         }
+    }
+    let initial_disc = disc_arg.filter(|_| !standalone).and_then(|a| {
+        find_file(&a).or_else(|| {
+            let p = PathBuf::from(&a);
+            if p.exists() { Some(p) } else { None }
+        })
     });
 
     if let Some(p) = initial_disc {
@@ -373,7 +388,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 6. Initialize Controls Configuration
     let mut bindings = KeyBindings::new();
-    let mut input_device_mode = InputDeviceMode::Gamepad;
+    let mut input_device_mode = if has_flag("--mouse") { InputDeviceMode::Mouse } else { InputDeviceMode::Gamepad };
 
     // 7. Attach Native Win32 Menu GUI
     #[cfg(target_os = "windows")]
@@ -397,6 +412,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut frame_count: u64 = 0;
+    let mut frames_run: u64 = 0;
     let mut disc_launched = false;
     let mut shell_ready_count: u32 = 0;
 
@@ -1016,6 +1032,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "OpenCDi – {} | {:.0}% ({:.1} FPS {}) | CPU: {:.2} MIPS | CD: {} | Render: {} | WaitStates: {}",
                 current_game_name, speed_pct, measured_fps, video_mode, measured_mips, cd_str, render_str, wait_status
             ));
+        }
+
+        frames_run += 1;
+        if max_frames.is_some_and(|n| frames_run >= n) {
+            info!("Stopping after {} frames (--frames)", frames_run);
+            break;
         }
     }
 

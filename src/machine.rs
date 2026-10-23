@@ -7,11 +7,12 @@ use std::sync::atomic::Ordering;
 pub struct Machine {
     pub bus: CdiBus,
     pub cpu: CpuCore,
+    pub instructions: u64,
 }
 
 impl Machine {
     pub fn new() -> Self {
-        Self { bus: CdiBus::new(), cpu: CpuCore::new() }
+        Self { bus: CdiBus::new(), cpu: CpuCore::new(), instructions: 0 }
     }
 
     pub fn load_bios<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<()> {
@@ -74,6 +75,7 @@ impl Machine {
                 bus.current_line_cycle = line_cycles.max(0) as u32;
 
                 let batch = cpu.run_for_cycles(bus, budget);
+                self.instructions += batch.instructions as u64;
                 let mut batch_cycles = batch.cycles + bus.consume_wait_cycles();
 
                 match batch.exit {

@@ -7,6 +7,9 @@ edition = "2024"
 default = ["host"]
 host = ["dep:minifb", "dep:cpal", "dep:gilrs", "dep:env_logger"]
 
+[workspace]
+members = ["crates/opencdi-libretro"]
+
 [[bin]]
 name = "opencdi"
 path = "src/main.rs"

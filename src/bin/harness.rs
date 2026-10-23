@@ -1,4 +1,5 @@
 use m68k::AddressBus;
+use opencdi::input_script::{self, Event, Player};
 use opencdi::machine::Machine;
 use opencdi::mcd212::{VideoMode, SCREEN_HEIGHT, SCREEN_WIDTH};
 
@@ -41,7 +42,7 @@ fn dump_ppm(fb: &[u32], path: &str) {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: harness <bios.rom> <disc|none> <frames> [--dvc <rom>] [--ppm <out.ppm>] [--ntsc] [--autoplay]");
+    eprintln!("usage: harness <bios.rom> <disc|none> <frames> [--dvc <rom>] [--ppm <out.ppm>] [--ntsc] [--autoplay [--print-autoplay-script]] [--input <script|@file>] [--sample <n>]");
     std::process::exit(2);
 }
 
@@ -56,6 +57,9 @@ fn main() {
     let mut ppm: Option<&String> = None;
     let mut ntsc = false;
     let mut autoplay = false;
+    let mut print_script = false;
+    let mut input: Option<String> = None;
+    let mut sample = 0u64;
     let mut i = 4;
     while i < a.len() {
         match a[i].as_str() {
@@ -63,10 +67,24 @@ fn main() {
             "--ppm" => { i += 1; ppm = a.get(i); }
             "--ntsc" => ntsc = true,
             "--autoplay" => autoplay = true,
+            "--print-autoplay-script" => print_script = true,
+            "--input" => { i += 1; input = Some(a.get(i).cloned().unwrap_or_else(|| usage())); }
+            "--sample" => { i += 1; sample = a.get(i).and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()); }
             _ => usage(),
         }
         i += 1;
     }
+    if (print_script && !autoplay) || (autoplay && input.is_some()) {
+        usage();
+    }
+    let mut player = input.map(|s| {
+        let text = match s.strip_prefix('@') {
+            Some(f) => std::fs::read_to_string(f).expect("read input script"),
+            None => s,
+        };
+        Player::new(input_script::parse(&text).unwrap_or_else(|e| panic!("input script: {}", e)))
+    });
+    let mut recorded: Vec<Event> = Vec::new();
 
     let mut m = Machine::new();
     m.load_bios(bios).expect("load bios");
@@ -97,17 +115,30 @@ fn main() {
             };
             if shell_state >= 2 {
                 shell_ready_count += 1;
-                if shell_ready_count == 1 || shell_ready_count == 150 {
-                    bus.slave.update_mouse(575, 335, 0);
-                } else if shell_ready_count == 30 || shell_ready_count == 180 {
-                    bus.slave.update_mouse(575, 335, 1);
-                } else if shell_ready_count == 50 || shell_ready_count == 200 {
-                    bus.slave.update_mouse(575, 335, 0);
+                let btn = match shell_ready_count {
+                    1 | 50 | 150 | 200 => Some(0),
+                    30 | 180 => Some(1),
+                    _ => None,
+                };
+                if let Some(b) = btn {
+                    bus.slave.update_mouse(575, 335, b);
+                    recorded.push(Event::Pointer { frame, x: 575, y: 335, buttons: b });
                 }
             }
             if ((cpu.pc >= 0x0001_0000 && cpu.pc < 0x0030_0000) || (cpu.pc >= 0x00D0_0000 && cpu.pc < 0x00E0_0000)) && frame > 250 {
                 disc_launched = true;
                 bus.slave.update_mouse(384, 280, 0);
+                recorded.push(Event::Pointer { frame, x: 384, y: 280, buttons: 0 });
+            }
+        }
+        if let Some(p) = player.as_mut() {
+            let slave = &mut m.bus.slave;
+            if slave.device_mouse_updated {
+                slave.device_mouse_updated = false;
+                p.warp(slave.device_mouse_x, slave.device_mouse_y);
+            }
+            if let Some((x, y, b)) = p.step(frame) {
+                slave.update_mouse(x, y, b);
             }
         }
 
@@ -115,6 +146,10 @@ fn main() {
 
         video_all = video_hash(video_all, m.framebuffer());
         drain_audio(&mut m, &mut audio_buf, &mut audio_all, &mut audio_samples);
+        if sample > 0 && (frame + 1) % sample == 0 {
+            let nb = m.framebuffer().iter().filter(|&&p| p & 0x00FF_FFFF != 0).count();
+            eprintln!("SAMPLE frame={} nonblack={}", frame + 1, nb);
+        }
     }
 
     let video_last = video_hash(FNV_OFFSET, m.framebuffer());
@@ -126,4 +161,7 @@ fn main() {
         "\nHARNESS frames={} pc={:08x} nonblack={} video_last={:016x} video_all={:016x} audio={:016x} audio_samples={}",
         frames, m.cpu.pc, nonblack, video_last, video_all, audio_all, audio_samples
     );
+    if print_script {
+        println!("AUTOPLAY_SCRIPT {}", input_script::format(&recorded));
+    }
 }

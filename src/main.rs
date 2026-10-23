@@ -1,28 +1,14 @@
 // OpenCDi Release Build - 2026-09-29 15:45
-mod audio;
-mod bus;
-mod cdic;
-mod cdrom;
-mod dma;
-pub mod dvc;
-mod gui;
-mod mcd212;
-mod nvram;
-mod scc_timer;
-mod slave;
-
 use std::path::{Path, PathBuf};
-use log::{info, error, debug};
-use m68k::{CpuCore, CpuType, AddressBus};
+use log::{info, error};
 use minifb::{Key, Window, WindowOptions};
 
-use crate::audio::HostAudioOutput;
-use crate::bus::CdiBus;
-use crate::gui::{
-    attach_gui_menu, pop_action, update_dvc_menu, update_input_device_menu, update_profile_menu,
-    GuiAction, InputDeviceMode, InputProfile, KeyBindings,
-};
-use crate::mcd212::{SCREEN_WIDTH, SCREEN_HEIGHT};
+use opencdi::audio::HostAudioOutput;
+use opencdi::frontend::{pop_action, push_action, GuiAction, InputDeviceMode, KeyBindings};
+#[cfg(target_os = "windows")]
+use opencdi::gui;
+use opencdi::machine::Machine;
+use opencdi::mcd212::{SCREEN_WIDTH, SCREEN_HEIGHT, VideoMode};
 
 #[cfg(target_os = "windows")]
 #[repr(C)]
@@ -204,6 +190,11 @@ fn toggle_fullscreen(window: &Window) {
             info!("Schermo intero: {}", if is_max { "FINESTRA" } else { "SCHERMO INTERO (4:3)" });
         }
     }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+        info!("Fullscreen toggle is Windows-only; maximise or resize the window instead");
+    }
 }
 
 fn save_screenshot(frame_count: u64, framebuffer: &[u32]) {
@@ -249,9 +240,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("=== OpenCDi - Philips CD-i Emulator ===");
 
-    let mut bus = CdiBus::new();
-    bus.slave.debug_log = std::env::args().any(|a| a == "--slave-debug");
-    if bus.slave.debug_log {
+    let mut m = Machine::new();
+    m.bus.slave.debug_log = std::env::args().any(|a| a == "--slave-debug");
+    if m.bus.slave.debug_log {
         info!("Debug Slave XBUS abilitato (--slave-debug): log byte CH0 (mouse)");
     }
 
@@ -298,12 +289,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
     };
-    bus.load_rom(&bios_path)?;
+    m.bus.load_rom(&bios_path)?;
     info!("Loaded system BIOS from {:?}", bios_path);
 
     // 2. Load NVRAM if present
     if let Some(nvram_path) = find_nvram_file() {
-        let _ = bus.nvram.load_from_file(&nvram_path);
+        let _ = m.bus.nvram.load_from_file(&nvram_path);
         info!("Loaded NVRAM from {:?}", nvram_path);
     }
 
@@ -311,7 +302,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dvc_disabled = std::env::args().any(|a| a == "--no-dvc" || a == "--nodvc");
     if !dvc_disabled {
         if let Some(dvc_path) = find_dvc_rom() {
-            if let Ok(_) = bus.load_dvc_rom(&dvc_path) {
+            if let Ok(_) = m.bus.load_dvc_rom(&dvc_path) {
                 info!("Loaded Digital Video Cartridge (DVC) ROM from {:?}", dvc_path);
             }
         } else {
@@ -335,7 +326,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     if let Some(p) = initial_disc {
-        match bus.load_cdrom(&p) {
+        match m.bus.load_cdrom(&p) {
             Ok(_) => {
                 current_game_name = p
                     .file_stem()
@@ -345,27 +336,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let name_upper = current_game_name.to_uppercase();
                 let is_ntsc = (name_upper.contains("(USA)") || name_upper.contains("(JAPAN)") || name_upper.contains("NTSC"))
-                    && bus.cdrom.as_ref().map_or(true, |cd| cd.disc_type != 0x20);
+                    && m.bus.cdrom.as_ref().map_or(true, |cd| cd.disc_type != 0x20);
                 if is_ntsc {
                     info!("Detected NTSC disc (USA/Japan): auto-configured NTSC 60 Hz video mode");
-                    bus.set_video_mode(crate::mcd212::VideoMode::Ntsc);
+                    m.bus.set_video_mode(VideoMode::Ntsc);
                 } else {
                     info!("Console booted in standard PAL 50 Hz mode (CD-i 220 BIOS)");
-                    bus.set_video_mode(crate::mcd212::VideoMode::Pal);
+                    m.bus.set_video_mode(VideoMode::Pal);
                 }
             }
             Err(e) => error!("Error loading game disc from {:?}: {:?}", p, e),
         }
     } else {
         info!("Starting console in Standalone BIOS mode (no disc inserted) - PAL 50 Hz");
-        bus.set_video_mode(crate::mcd212::VideoMode::Pal);
+        m.bus.set_video_mode(VideoMode::Pal);
     }
 
     // 4. Initialize 68070 CPU Core
-    let mut cpu = CpuCore::new();
-    cpu.set_cpu_type(CpuType::SCC68070);
-    cpu.reset(&mut bus);
-    info!("CPU SCC68070 reset - PC: 0x{:08X}", cpu.pc);
+    m.reset();
+    info!("CPU SCC68070 reset - PC: 0x{:08X}", m.cpu.pc);
 
     // 5. Create Display Window
     let mut window = Window::new(
@@ -390,15 +379,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "windows")]
     {
         let hwnd = window.get_window_handle();
-        attach_gui_menu(hwnd, bindings.profile, input_device_mode, bus.mcd212.video_mode);
-        crate::gui::update_dvc_menu(bus.dvc.is_fitted());
+        gui::attach_gui_menu(hwnd, bindings.profile, input_device_mode, m.bus.mcd212.video_mode);
+        gui::update_dvc_menu(m.bus.dvc.is_fitted());
     }
 
     // 8. Initialize Host Audio Playback
     let _host_audio = HostAudioOutput::try_start(
-        bus.cdic.audio.sample_queue.clone(),
-        bus.cdic.audio.sfx_queue.clone(),
-        bus.cdic.audio.source_rate.clone(),
+        m.bus.cdic.audio.sample_queue.clone(),
+        m.bus.cdic.audio.sfx_queue.clone(),
+        m.bus.cdic.audio.source_rate.clone(),
     );
 
     // 9. Initialize USB Gamepad subsystem (Gilrs / XInput / DirectInput)
@@ -408,16 +397,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut frame_count: u64 = 0;
-    let mut total_instructions: u64 = 0;
     let mut disc_launched = false;
     let mut shell_ready_count: u32 = 0;
 
-    let mut pad_x: i32 = if bus.cdrom.is_some() { 575 } else { 384 };
-    let mut pad_y: i32 = if bus.cdrom.is_some() { 335 } else { 280 };
+    let mut pad_x: i32 = if m.bus.cdrom.is_some() { 575 } else { 384 };
+    let mut pad_y: i32 = if m.bus.cdrom.is_some() { 335 } else { 280 };
     let mut pad_x_f: f32 = pad_x as f32;
     let mut pad_y_f: f32 = pad_y as f32;
     let mut pad_active = false;
-    bus.emulate_wait_states = true; // Authentic hardware wait-states (15.5 MHz)
+    m.bus.emulate_wait_states = true; // Authentic hardware wait-states (15.5 MHz)
     let mut mouse_captured = true;
     let mut host_cursor_hidden = false;
     let mut mouse_clipped = false;
@@ -440,7 +428,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut prev_instructions: u64 = 0;
     let mut prev_cd_sectors: u32 = 0;
-    let mut prev_vsr = (bus.mcd212.get_vsr::<0>(), bus.mcd212.get_vsr::<1>());
+    let mut prev_vsr = (m.bus.mcd212.get_vsr::<0>(), m.bus.mcd212.get_vsr::<1>());
     let mut buffer_flips_interval: u32 = 0;
     let mut measured_render_fps: f64 = 0.0;
     let mut measured_mips: f64 = 0.0;
@@ -453,7 +441,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match action {
                 GuiAction::InsertDisc(path) => {
                     info!("Hot-swapping disc into CD-i drive: {:?}", path);
-                    match bus.change_disc(&path) {
+                    match m.bus.change_disc(&path) {
                         Ok(_) => {
                             current_game_name = path
                                 .file_stem()
@@ -468,7 +456,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 GuiAction::OpenDisc(path) => {
                     info!("Loading and booting new disc (Reset): {:?}", path);
-                    match bus.load_cdrom(&path) {
+                    match m.bus.load_cdrom(&path) {
                         Ok(_) => {
                             current_game_name = path
                                 .file_stem()
@@ -476,31 +464,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .unwrap_or_else(|| "CD-i Disc".to_string());
                             info!("Disc loaded successfully: {}", current_game_name);
 
-                            if !dvc_disabled && !bus.dvc.is_fitted() {
+                            if !dvc_disabled && !m.bus.dvc.is_fitted() {
                                 if let Some(dvc_path) = find_dvc_rom() {
-                                    if let Ok(_) = bus.load_dvc_rom(&dvc_path) {
+                                    if let Ok(_) = m.bus.load_dvc_rom(&dvc_path) {
                                         info!("Loaded Digital Video Cartridge (DVC) extension from {:?}", dvc_path);
                                         #[cfg(target_os = "windows")]
-                                        crate::gui::update_dvc_menu(true);
+                                        gui::update_dvc_menu(true);
                                     }
                                 }
                             }
 
                             let name_upper = current_game_name.to_uppercase();
                             let is_ntsc = (name_upper.contains("(USA)") || name_upper.contains("(JAPAN)") || name_upper.contains("NTSC"))
-                                && bus.cdrom.as_ref().map_or(true, |cd| cd.disc_type != 0x20);
+                                && m.bus.cdrom.as_ref().map_or(true, |cd| cd.disc_type != 0x20);
                             let mode = if is_ntsc {
                                 info!("Detected NTSC disc (USA/Japan): auto-configured NTSC 60 Hz video mode");
-                                crate::mcd212::VideoMode::Ntsc
+                                VideoMode::Ntsc
                             } else {
-                                crate::mcd212::VideoMode::Pal
+                                VideoMode::Pal
                             };
-                            bus.set_video_mode(mode);
+                            m.bus.set_video_mode(mode);
                             #[cfg(target_os = "windows")]
-                            crate::gui::update_video_menu(mode);
+                            gui::update_video_menu(mode);
 
-                            bus.reset_system();
-                            cpu.reset(&mut bus);
+                            m.bus.reset_system();
+                            m.cpu.reset(&mut m.bus);
                             frame_count = 0;
                             disc_launched = false;
                             shell_ready_count = 0;
@@ -510,7 +498,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             pad_y_f = 335.0;
                             pad_active = false;
                             mouse_captured = true;
-                            bus.emulate_wait_states = true;
+                            m.bus.emulate_wait_states = true;
                             next_frame_time = std::time::Instant::now();
                             fps_timer = std::time::Instant::now();
                         }
@@ -521,8 +509,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 GuiAction::EjectDisc => {
                     info!("Ejecting disc from CD-i drive");
-                    bus.slave.set_disc_inserted(false);
-                    bus.cdrom = None;
+                    m.bus.slave.set_disc_inserted(false);
+                    m.bus.cdrom = None;
                     disc_launched = false;
                     shell_ready_count = 0;
                     current_game_name = "No disc inserted (Standalone BIOS)".to_string();
@@ -533,18 +521,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 GuiAction::Reset => {
                     info!("Console reset requested");
-                    bus.reset_system();
-                    cpu.reset(&mut bus);
+                    m.bus.reset_system();
+                    m.cpu.reset(&mut m.bus);
                     frame_count = 0;
                     disc_launched = false;
                     shell_ready_count = 0;
-                    pad_x = if bus.cdrom.is_some() { 575 } else { 384 };
-                    pad_y = if bus.cdrom.is_some() { 335 } else { 280 };
+                    pad_x = if m.bus.cdrom.is_some() { 575 } else { 384 };
+                    pad_y = if m.bus.cdrom.is_some() { 335 } else { 280 };
                     pad_x_f = pad_x as f32;
                     pad_y_f = pad_y as f32;
                     pad_active = false;
                     mouse_captured = true;
-                    bus.emulate_wait_states = true;
+                    m.bus.emulate_wait_states = true;
                     next_frame_time = std::time::Instant::now();
                     fps_timer = std::time::Instant::now();
                 }
@@ -555,17 +543,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 GuiAction::SetProfile(profile) => {
                     bindings.set_profile(profile);
-                    update_profile_menu(bindings.profile);
+                    #[cfg(target_os = "windows")]
+                    gui::update_profile_menu(bindings.profile);
                     info!("Control profile updated to: {:?}", bindings.profile);
                 }
                 GuiAction::SetInputDevice(mode) => {
                     input_device_mode = mode;
-                    update_input_device_menu(mode);
+                    #[cfg(target_os = "windows")]
+                    gui::update_input_device_menu(mode);
                     info!("Input device mode set to: {:?}", mode);
                 }
                 GuiAction::ReloadControls => {
                     bindings.load_from_ini();
-                    update_profile_menu(bindings.profile);
+                    #[cfg(target_os = "windows")]
+                    gui::update_profile_menu(bindings.profile);
                     info!("Controls reloaded from INI file. Profile: {:?}", bindings.profile);
                 }
                 GuiAction::ToggleReleaseMouse => {
@@ -573,68 +564,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     info!("Mouse capture: {}", if mouse_captured { "CAPTURED" } else { "RELEASED" });
                 }
                 GuiAction::ToggleMute => {
-                    bus.cdic.audio.muted = !bus.cdic.audio.muted;
-                    info!("Audio: {}", if bus.cdic.audio.muted { "MUTED" } else { "UNMUTED" });
+                    m.bus.cdic.audio.muted = !m.bus.cdic.audio.muted;
+                    info!("Audio: {}", if m.bus.cdic.audio.muted { "MUTED" } else { "UNMUTED" });
                 }
                 GuiAction::VolumeUp => {
-                    bus.cdic.audio.volume = (bus.cdic.audio.volume + 0.05).min(2.0);
+                    m.bus.cdic.audio.volume = (m.bus.cdic.audio.volume + 0.05).min(2.0);
                 }
                 GuiAction::VolumeDown => {
-                    bus.cdic.audio.volume = (bus.cdic.audio.volume - 0.05).max(0.0);
+                    m.bus.cdic.audio.volume = (m.bus.cdic.audio.volume - 0.05).max(0.0);
                 }
                 GuiAction::ToggleFullscreen => {
                     toggle_fullscreen(&window);
                 }
                 GuiAction::TakeScreenshot => {
-                    save_screenshot(frame_count, &bus.mcd212.framebuffer[..]);
+                    save_screenshot(frame_count, &m.bus.mcd212.framebuffer[..]);
                 }
                 GuiAction::SetVideoMode(mode) => {
-                    bus.set_video_mode(mode);
+                    m.bus.set_video_mode(mode);
                     #[cfg(target_os = "windows")]
-                    crate::gui::update_video_menu(mode);
+                    gui::update_video_menu(mode);
                     info!("Video mode set to: {:?}", mode);
                 }
                 GuiAction::ToggleWaitStates => {
-                    bus.emulate_wait_states = !bus.emulate_wait_states;
+                    m.bus.emulate_wait_states = !m.bus.emulate_wait_states;
                     #[cfg(target_os = "windows")]
-                    crate::gui::update_waitstates_menu(bus.emulate_wait_states);
-                    info!("Authentic Hardware Speed (Wait-States): {}", if bus.emulate_wait_states { "ENABLED (Authentic CD-i 220)" } else { "DISABLED (Turbo Zero-Wait)" });
+                    gui::update_waitstates_menu(m.bus.emulate_wait_states);
+                    info!("Authentic Hardware Speed (Wait-States): {}", if m.bus.emulate_wait_states { "ENABLED (Authentic CD-i 220)" } else { "DISABLED (Turbo Zero-Wait)" });
                 }
                 GuiAction::ToggleDvc => {
-                    if bus.dvc.is_fitted() {
+                    if m.bus.dvc.is_fitted() {
                         info!("Removing Digital Video Cartridge (Base CD-i mode)");
-                        bus.dvc = crate::dvc::Dvc::new();
+                        m.bus.dvc = opencdi::dvc::Dvc::new();
                         #[cfg(target_os = "windows")]
-                        crate::gui::update_dvc_menu(false);
+                        gui::update_dvc_menu(false);
                     } else {
                         if let Some(dvc_path) = find_dvc_rom() {
-                            if let Ok(_) = bus.load_dvc_rom(&dvc_path) {
+                            if let Ok(_) = m.bus.load_dvc_rom(&dvc_path) {
                                 info!("Inserted Digital Video Cartridge (DVC) from {:?}", dvc_path);
                                 #[cfg(target_os = "windows")]
-                                crate::gui::update_dvc_menu(true);
+                                gui::update_dvc_menu(true);
                             }
                         } else {
                             error!("Cannot enable DVC: vmpega.rom not found in dvc/, bios/, or root directory");
                         }
                     }
-                    bus.reset_system();
-                    cpu.reset(&mut bus);
+                    m.bus.reset_system();
+                    m.cpu.reset(&mut m.bus);
                     frame_count = 0;
                     disc_launched = false;
                     shell_ready_count = 0;
-                    pad_x = if bus.cdrom.is_some() { 575 } else { 384 };
-                    pad_y = if bus.cdrom.is_some() { 335 } else { 280 };
+                    pad_x = if m.bus.cdrom.is_some() { 575 } else { 384 };
+                    pad_y = if m.bus.cdrom.is_some() { 335 } else { 280 };
                     pad_x_f = pad_x as f32;
                     pad_y_f = pad_y as f32;
                     pad_active = false;
                 }
                 GuiAction::ShowHelp => {
                     #[cfg(target_os = "windows")]
-                    crate::gui::show_controls_dialog(window.get_window_handle());
+                    gui::show_controls_dialog(window.get_window_handle());
                 }
                 GuiAction::ShowAbout => {
                     #[cfg(target_os = "windows")]
-                    crate::gui::show_about_dialog(window.get_window_handle());
+                    gui::show_about_dialog(window.get_window_handle());
                 }
             }
         }
@@ -644,141 +635,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Se un disco è presente, avvia automaticamente la riproduzione una sola volta quando la shell del BIOS è pronta
-        if bus.cdrom.is_some() && !disc_launched {
-            let (_effective_shell_base, shell_state) = if bus.dvc.is_fitted() {
-                let s_dvc = bus.read_long(0x00D08090u32.wrapping_add(0xFFFF9172));
+        if m.bus.cdrom.is_some() && !disc_launched {
+            let (_effective_shell_base, shell_state) = if m.bus.dvc.is_fitted() {
+                let s_dvc = m.bus.peek_long(0x00D08090u32.wrapping_add(0xFFFF9172)).unwrap_or(0);
                 if s_dvc >= 2 {
                     (0x00D08090u32, s_dvc)
                 } else {
-                    (0x0000C000u32, bus.read_long(0x0000C000u32.wrapping_add(0xFFFF9172)))
+                    (0x0000C000u32, m.bus.peek_long(0x0000C000u32.wrapping_add(0xFFFF9172)).unwrap_or(0))
                 }
             } else {
-                (0x0000C000u32, bus.read_long(0x0000C000u32.wrapping_add(0xFFFF9172)))
+                (0x0000C000u32, m.bus.peek_long(0x0000C000u32.wrapping_add(0xFFFF9172)).unwrap_or(0))
             };
 
             if shell_state >= 2 {
                 shell_ready_count += 1;
                 if shell_ready_count == 1 || shell_ready_count == 150 {
-                    bus.slave.update_mouse(575, 335, 0);
+                    m.bus.slave.update_mouse(575, 335, 0);
                 } else if shell_ready_count == 30 || shell_ready_count == 180 {
                     info!("Shell BIOS pronta (stato {}): avvio automatico disco CD-i (click PLAY CD-I)...", shell_state);
-                    bus.slave.update_mouse(575, 335, 1);
+                    m.bus.slave.update_mouse(575, 335, 1);
                 } else if shell_ready_count == 50 || shell_ready_count == 200 {
-                    bus.slave.update_mouse(575, 335, 0);
+                    m.bus.slave.update_mouse(575, 335, 0);
                 }
             }
-            if ((cpu.pc >= 0x00010000 && cpu.pc < 0x00300000) || (cpu.pc >= 0x00D00000 && cpu.pc < 0x00E00000)) && frame_count > 250 {
-                info!("Applicazione disco in esecuzione in RAM (PC=0x{:06X}), controllo passato all'utente.", cpu.pc);
+            if ((m.cpu.pc >= 0x00010000 && m.cpu.pc < 0x00300000) || (m.cpu.pc >= 0x00D00000 && m.cpu.pc < 0x00E00000)) && frame_count > 250 {
+                info!("Applicazione disco in esecuzione in RAM (PC=0x{:06X}), controllo passato all'utente.", m.cpu.pc);
                 disc_launched = true;
-                bus.emulate_wait_states = true;
+                m.bus.emulate_wait_states = true;
                 pad_x = 384;
                 pad_y = 280;
                 pad_x_f = 384.0;
                 pad_y_f = 280.0;
-                bus.slave.update_mouse(384, 280, 0);
+                m.bus.slave.update_mouse(384, 280, 0);
             }
         }
 
-        bus.slave.video_mode = bus.mcd212.video_mode;
-        let total_lines = bus.mcd212.video_mode.total_scanlines();
-        let cyc_per_line = bus.mcd212.video_mode.cycles_per_scanline();
-        let mut cycle_debt: i32 = 0;
-        for _line in 0..total_lines {
-            bus.tick_scanline(_line);
+        m.run_frame();
 
-            // Update MCD212 INT1 pending in LIR
-            if bus.mcd212.vblank_irq {
-                bus.scc_timer.lir |= 0x80;
-                bus.mcd212.vblank_irq = false;
-            }
-
-            // Canonical 68000 IPL: maximum active interrupt level
-            let int1_lvl = if (bus.scc_timer.lir & 0x80) != 0 {
-                let lvl = (bus.scc_timer.lir >> 4) & 7;
-                if lvl != 0 { lvl } else { 5 }
-            } else { 0 };
-
-            let timer_lvl = if bus.scc_timer.timer_irq {
-                bus.scc_timer.picr1 & 7
-            } else { 0 };
-
-            let cdic_lvl = if bus.in4_pending() { 4 } else { 0 };
-            let slave_lvl = if bus.slave.irq_pending { 2 } else { 0 };
-
-            let highest_ipl = int1_lvl.max(timer_lvl).max(cdic_lvl).max(slave_lvl);
-            cpu.set_irq(highest_ipl);
-
-            let mut line_cycles = cycle_debt;
-            while line_cycles < cyc_per_line as i32 {
-                let remaining = (cyc_per_line as i32 - line_cycles).max(1);
-                let budget = remaining.min(32);
-
-                bus.current_pc = cpu.pc;
-                bus.current_line_cycle = line_cycles.max(0) as u32;
-
-                let batch = cpu.run_for_cycles(&mut bus, budget);
-                total_instructions += batch.instructions as u64;
-                let mut batch_cycles = batch.cycles + bus.consume_wait_cycles();
-
-                match batch.exit {
-                    m68k::CycleBatchExit::TrapInstruction { trap_num } => {
-                        let trap_cyc = cpu.take_trap_exception(&mut bus, trap_num);
-                        batch_cycles += trap_cyc;
-                    }
-                    m68k::CycleBatchExit::AlineTrap { .. } => {
-                        let trap_cyc = cpu.take_aline_exception(&mut bus);
-                        batch_cycles += trap_cyc;
-                    }
-                    m68k::CycleBatchExit::FlineTrap { .. } => {
-                        let trap_cyc = cpu.take_fline_exception(&mut bus);
-                        batch_cycles += trap_cyc;
-                    }
-                    m68k::CycleBatchExit::IllegalInstruction { .. } => {
-                        let trap_cyc = cpu.take_illegal_exception(&mut bus);
-                        batch_cycles += trap_cyc;
-                    }
-                    m68k::CycleBatchExit::Breakpoint { .. } => {
-                        let trap_cyc = cpu.take_bkpt_exception(&mut bus);
-                        batch_cycles += trap_cyc;
-                    }
-                    m68k::CycleBatchExit::Stopped => {
-                        let remaining_line = (cyc_per_line as i32 - line_cycles).max(0) as u32;
-                        bus.tick_timer(remaining_line);
-                        line_cycles = cyc_per_line as i32;
-                        break;
-                    }
-                    _ => {}
-                }
-
-                line_cycles += batch_cycles;
-                bus.tick_timer(batch_cycles as u32);
-
-                // Dynamically update IRQ level so timer/peripheral interrupts are handled promptly!
-                let int1_lvl = if (bus.scc_timer.lir & 0x80) != 0 {
-                    let lvl = (bus.scc_timer.lir >> 4) & 7;
-                    if lvl != 0 { lvl } else { 5 }
-                } else { 0 };
-                let timer_lvl = if bus.scc_timer.timer_irq {
-                    bus.scc_timer.picr1 & 7
-                } else { 0 };
-                let cdic_lvl = if bus.in4_pending() { 4 } else { 0 };
-                let slave_lvl = if bus.slave.irq_pending { 2 } else { 0 };
-                let highest_ipl = int1_lvl.max(timer_lvl).max(cdic_lvl).max(slave_lvl);
-                cpu.set_irq(highest_ipl);
-            }
-
-            cycle_debt = (line_cycles - cyc_per_line as i32).clamp(0, 100);
-
-            // Rasterize active scanline at display scanout time (end of line cycles)
-            bus.render_scanline(_line);
-
-            // Clock real-time peripherals (Slave MCU, CDIC, DVC) strictly at 15.5 MHz master clock
-            bus.tick_slave(cyc_per_line);
-            bus.tick_cdic(cyc_per_line);
-            bus.tick_dvc(cyc_per_line);
-        }
-
-        let curr_vsr = (bus.mcd212.get_vsr::<0>(), bus.mcd212.get_vsr::<1>());
+        let curr_vsr = (m.bus.mcd212.get_vsr::<0>(), m.bus.mcd212.get_vsr::<1>());
         if curr_vsr != prev_vsr {
             prev_vsr = curr_vsr;
             buffer_flips_interval += 1;
@@ -802,10 +696,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if is_active && ctrl_down && i_down && !prev_ctrl_i {
             #[cfg(target_os = "windows")]
             {
-                if let Some(path) = crate::gui::open_file_dialog(hwnd) {
-                    gui::push_action(GuiAction::InsertDisc(path));
+                if let Some(path) = gui::open_file_dialog(hwnd) {
+                    push_action(GuiAction::InsertDisc(path));
                 }
             }
+            #[cfg(not(target_os = "windows"))]
+            info!("No file dialog on this platform: pass the disc path on the command line");
         }
         prev_ctrl_i = ctrl_down && i_down;
 
@@ -814,17 +710,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if is_active && ctrl_down && o_down && !prev_ctrl_o {
             #[cfg(target_os = "windows")]
             {
-                if let Some(path) = crate::gui::open_file_dialog(hwnd) {
-                    gui::push_action(GuiAction::OpenDisc(path));
+                if let Some(path) = gui::open_file_dialog(hwnd) {
+                    push_action(GuiAction::OpenDisc(path));
                 }
             }
+            #[cfg(not(target_os = "windows"))]
+            info!("No file dialog on this platform: pass the disc path on the command line");
         }
         prev_ctrl_o = ctrl_down && o_down;
 
         // Keyboard Shortcut: F5 (Reset)
         let f5_down = window.is_key_down(Key::F5);
         if is_active && f5_down && !prev_f5 {
-            gui::push_action(GuiAction::Reset);
+            push_action(GuiAction::Reset);
         }
         prev_f5 = f5_down;
 
@@ -980,15 +878,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        if bus.slave.device_mouse_updated {
-            pad_x = bus.slave.device_mouse_x;
-            pad_y = bus.slave.device_mouse_y;
+        if m.bus.slave.device_mouse_updated {
+            pad_x = m.bus.slave.device_mouse_x;
+            pad_y = m.bus.slave.device_mouse_y;
             pad_x_f = pad_x as f32;
             pad_y_f = pad_y as f32;
-            bus.slave.device_mouse_updated = false;
+            m.bus.slave.device_mouse_updated = false;
         }
 
-        if !disc_launched && bus.cdrom.is_some() {
+        if !disc_launched && m.bus.cdrom.is_some() {
             // During automatic boot sequence, do not let host mouse drift override PLAY CD-I auto-click
         } else {
             match input_device_mode {
@@ -1006,7 +904,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         moved = true;
                     }
                     if moved || key_btn != prev_key_btn {
-                        bus.slave.update_mouse(pad_x, pad_y, key_btn);
+                        m.bus.slave.update_mouse(pad_x, pad_y, key_btn);
                     }
                     prev_key_btn = key_btn;
                 }
@@ -1015,7 +913,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pad_y = mouse_y;
                     pad_x_f = mouse_x as f32;
                     pad_y_f = mouse_y as f32;
-                    bus.slave.update_mouse(pad_x, pad_y, mouse_btn | key_btn);
+                    m.bus.slave.update_mouse(pad_x, pad_y, mouse_btn | key_btn);
                 }
             }
         }
@@ -1023,28 +921,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Screenshot hotkey (F12)
         let s_pressed = window.is_key_down(Key::F12);
         if s_pressed && !prev_s {
-            save_screenshot(frame_count, &bus.mcd212.framebuffer[..]);
+            save_screenshot(frame_count, &m.bus.mcd212.framebuffer[..]);
         }
         prev_s = s_pressed;
 
         // Audio hotkeys (M = Mute/Unmute, + / - = Volume)
         let m_pressed = window.is_key_down(Key::M);
         if m_pressed && !prev_m {
-            bus.cdic.audio.muted = !bus.cdic.audio.muted;
-            info!("Audio: {}", if bus.cdic.audio.muted { "MUTED" } else { "UNMUTED" });
+            m.bus.cdic.audio.muted = !m.bus.cdic.audio.muted;
+            info!("Audio: {}", if m.bus.cdic.audio.muted { "MUTED" } else { "UNMUTED" });
         }
         prev_m = m_pressed;
 
         if window.is_key_down(Key::Equal) || window.is_key_down(Key::NumPadPlus) {
-            bus.cdic.audio.volume = (bus.cdic.audio.volume + 0.02).min(2.0);
+            m.bus.cdic.audio.volume = (m.bus.cdic.audio.volume + 0.02).min(2.0);
         }
         if window.is_key_down(Key::Minus) || window.is_key_down(Key::NumPadMinus) {
-            bus.cdic.audio.volume = (bus.cdic.audio.volume - 0.02).max(0.0);
+            m.bus.cdic.audio.volume = (m.bus.cdic.audio.volume - 0.02).max(0.0);
         }
 
         // Precision host frame pacing (prevents fast-forward catchup bursts and frame-time oscillation)
-        let target_frame_duration = bus.mcd212.video_mode.frame_duration();
-        window.update_with_buffer(&bus.mcd212.framebuffer[..], SCREEN_WIDTH, SCREEN_HEIGHT)?;
+        let target_frame_duration = m.bus.mcd212.video_mode.frame_duration();
+        window.update_with_buffer(&m.bus.mcd212.framebuffer[..], SCREEN_WIDTH, SCREEN_HEIGHT)?;
         let now = std::time::Instant::now();
 
         if now < next_frame_time {
@@ -1062,16 +960,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         frame_count += 1;
-        let fps_interval = if bus.mcd212.video_mode == crate::mcd212::VideoMode::Pal { 25 } else { 30 };
+        let fps_interval = if m.bus.mcd212.video_mode == VideoMode::Pal { 25 } else { 30 };
         if frame_count % fps_interval == 0 {
             let elapsed_secs = fps_timer.elapsed().as_secs_f64();
             if elapsed_secs > 0.0 {
                 measured_fps = (fps_interval as f64) / elapsed_secs;
-                let inst_delta = total_instructions.saturating_sub(prev_instructions);
+                let inst_delta = m.instructions.saturating_sub(prev_instructions);
                 measured_mips = (inst_delta as f64 / elapsed_secs) / 1_000_000.0;
-                prev_instructions = total_instructions;
+                prev_instructions = m.instructions;
 
-                let curr_sectors = bus.cdic.curr_lba;
+                let curr_sectors = m.bus.cdic.curr_lba;
                 let sec_delta = curr_sectors.saturating_sub(prev_cd_sectors);
                 measured_cd_rate = sec_delta as f64 / elapsed_secs;
                 prev_cd_sectors = curr_sectors;
@@ -1081,7 +979,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             fps_timer = std::time::Instant::now();
 
-            let target_fps = bus.mcd212.video_mode.fps();
+            let target_fps = m.bus.mcd212.video_mode.fps();
             let speed_pct = (measured_fps / target_fps) * 100.0;
 
             // Real-Time Anomaly Detector
@@ -1091,18 +989,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     speed_pct, measured_fps, target_fps, measured_mips, measured_cd_rate
                 );
             }
-            if measured_mips > 4.5 && bus.emulate_wait_states {
+            if measured_mips > 4.5 && m.bus.emulate_wait_states {
                 log::warn!(
                     "[TELEMETRY CPU ANOMALY] Unexpected CPU throughput: {:.2} MIPS (expected ~3.2-3.5 MIPS for SCC68070 at 15.5MHz)",
                     measured_mips
                 );
             }
 
-            let video_mode = match bus.mcd212.video_mode {
-                crate::mcd212::VideoMode::Pal => "50Hz (PAL)",
-                crate::mcd212::VideoMode::Ntsc => "60Hz (NTSC)",
+            let video_mode = match m.bus.mcd212.video_mode {
+                VideoMode::Pal => "50Hz (PAL)",
+                VideoMode::Ntsc => "60Hz (NTSC)",
             };
-            let wait_status = if bus.emulate_wait_states { "ON" } else { "TURBO" };
+            let wait_status = if m.bus.emulate_wait_states { "ON" } else { "TURBO" };
             let cd_speed_x = measured_cd_rate / 75.0;
             let cd_str = if measured_cd_rate > 0.5 {
                 format!("{:.1} sec/s ({:.1}x)", measured_cd_rate, cd_speed_x)
@@ -1130,6 +1028,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         timeEndPeriod(1);
     }
 
-    info!("Emulation stopped. Final PC: 0x{:08X}", cpu.pc);
+    info!("Emulation stopped. Final PC: 0x{:08X}", m.cpu.pc);
     Ok(())
 }

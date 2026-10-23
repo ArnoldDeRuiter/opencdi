@@ -152,6 +152,33 @@ fn save_screenshot(frame_count: u64, framebuffer: &[u32]) {
     }
 }
 
+// F8: binary PPM (no image crate needed) into local/screenshots when run from the repo, else screenshots/ next to the binary
+fn save_screenshot_ppm(frame_count: u64, framebuffer: &[u32]) {
+    let dir = if Path::new("local").is_dir() {
+        PathBuf::from("local").join("screenshots")
+    } else {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("screenshots")))
+            .unwrap_or_else(|| PathBuf::from("screenshots"))
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        error!("Cannot create screenshot directory {:?}: {}", dir, e);
+        return;
+    }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let path = dir.join(format!("opencdi_{}_frame{}.ppm", stamp, frame_count));
+    let mut ppm = format!("P6\n{} {}\n255\n", SCREEN_WIDTH, SCREEN_HEIGHT).into_bytes();
+    ppm.reserve(SCREEN_WIDTH * SCREEN_HEIGHT * 3);
+    for &pixel in &framebuffer[..SCREEN_WIDTH * SCREEN_HEIGHT] {
+        ppm.extend_from_slice(&[(pixel >> 16) as u8, (pixel >> 8) as u8, pixel as u8]);
+    }
+    match std::fs::write(&path, &ppm) {
+        Ok(_) => info!("Screenshot saved to {:?}", path),
+        Err(e) => error!("Cannot write screenshot {:?}: {}", path, e),
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -336,6 +363,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         prev_middle: false,
         mouse_captured: true,
         host_input: !has_flag("--no-host-input"),
+        paused: false,
+        fast_forward: false,
+        last_present: now,
+        state_slot: 0,
         occluded: false,
         grab_applied: None,
         frame_count: 0,
@@ -360,7 +391,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         measured_cd_rate: 0.0,
     };
 
-    info!("Emulation loop started. Use menu or shortcuts: [Ctrl+I] Insert Disc, [Ctrl+O] Open & Reset, [F5] Reset, [F11] Fullscreen, [Middle Click] Capture/Release Mouse");
+    info!("Emulation loop started. Shortcuts: [F11]/[Alt+Enter] Fullscreen, [F5]/[H] Reset, [P] Pause, [Space] hold Fast-forward, [F8] Screenshot (PPM), [F12] Screenshot (BMP), [F2]/[F4] Save/Load state, [F6]/[F7] State slot, [M] Mute, [+]/[-] Volume, [Ctrl+I] Insert Disc, [Ctrl+O] Open & Reset, [Middle Click] Capture/Release Mouse, [Esc] Quit");
 
     let event_loop = EventLoop::new()?;
     event_loop.run_app(&mut app)?;
@@ -434,6 +465,10 @@ struct App {
     mouse_captured: bool,
     host_input: bool,
     occluded: bool,
+    paused: bool,
+    fast_forward: bool,
+    last_present: Instant,
+    state_slot: u32,
     grab_applied: Option<bool>,
     frame_count: u64,
     frames_run: u64,
@@ -522,16 +557,45 @@ impl App {
         }
     }
 
+    // A key bound to a CD-i control in opencdi_controls.ini is not a shortcut
+    fn bound(&self, k: Key) -> bool {
+        let b = &self.bindings;
+        [b.up, b.down, b.left, b.right, b.btn1, b.btn2].contains(&k)
+    }
+
+    // Savestate hooks: the save/load work plugs in here
+    fn save_state(&mut self) {
+        info!("savestates not implemented yet (slot {})", self.state_slot);
+    }
+
+    fn load_state(&mut self) {
+        info!("savestates not implemented yet (slot {})", self.state_slot);
+    }
+
     fn on_key_pressed(&mut self, el: &ActiveEventLoop, code: Key) {
         let ctrl = self.mods.control_key();
+        let alt = self.mods.alt_key();
         match code {
             Key::Escape => el.exit(),
             Key::KeyI if ctrl => self.open_dialog_action(false),
             Key::KeyO if ctrl => self.open_dialog_action(true),
             Key::F5 => push_action(GuiAction::Reset),
+            Key::KeyH if !ctrl && !self.bound(code) => push_action(GuiAction::Reset),
+            Key::KeyP if !ctrl && !self.bound(code) => {
+                self.paused = !self.paused;
+                info!("Emulation: {}", if self.paused { "PAUSED" } else { "RUNNING" });
+            }
             Key::F11 => self.toggle_fullscreen(),
+            Key::Enter | Key::NumpadEnter if alt => self.toggle_fullscreen(),
+            Key::F8 => save_screenshot_ppm(self.frame_count, &self.m.bus.mcd212.framebuffer[..]),
             Key::F12 => save_screenshot(self.frame_count, &self.m.bus.mcd212.framebuffer[..]),
-            Key::KeyM => {
+            Key::F2 => self.save_state(),
+            Key::F4 => self.load_state(),
+            Key::F6 | Key::F7 => {
+                self.state_slot = if code == Key::F6 { self.state_slot.saturating_sub(1) } else { (self.state_slot + 1).min(999) };
+                info!("State slot: {}", self.state_slot);
+            }
+            Key::KeyM if !self.bound(code) => {
                 self.m.bus.cdic.audio.muted = !self.m.bus.cdic.audio.muted;
                 info!("Audio: {}", if self.m.bus.cdic.audio.muted { "MUTED" } else { "UNMUTED" });
             }
@@ -792,9 +856,9 @@ impl App {
             }
 
             // Button 1 (Action / Sword / Start) and Button 2 (Jump / Secondary)
+            // Space is fast-forward unless bound in the ini; Enter with Alt is fullscreen
             if self.key(b.btn1)
-                || self.key(Key::Space)
-                || self.key(Key::Enter)
+                || (self.key(Key::Enter) && !self.mods.alt_key())
                 || self.key(Key::KeyZ)
                 || self.key(Key::KeyJ)
             {
@@ -966,7 +1030,7 @@ impl App {
         let speed_pct = (self.measured_fps / target_fps) * 100.0;
 
         // Real-Time Anomaly Detector
-        if self.frame_count > 100 && (speed_pct > 108.0 || (speed_pct < 92.0 && speed_pct > 20.0)) {
+        if self.frame_count > 100 && !self.fast_forward && (speed_pct > 108.0 || (speed_pct < 92.0 && speed_pct > 20.0)) {
             log::warn!(
                 "[TELEMETRY SPEED ANOMALY] Speed: {:.1}% ({:.1} FPS on target {:.0} Hz) | MIPS: {:.2} | CD: {:.1} sec/s",
                 speed_pct, self.measured_fps, target_fps, self.measured_mips, self.measured_cd_rate
@@ -1008,6 +1072,9 @@ impl App {
         if !self.handle_actions() {
             return false;
         }
+        if self.paused {
+            return true;
+        }
         self.autoplay();
         self.m.run_frame();
 
@@ -1019,7 +1086,18 @@ impl App {
 
         self.update_input();
         // Emulation runs on the timer; only the picture is skipped while the window is hidden
-        if let Some(window) = self.window.as_ref().filter(|_| !self.occluded) {
+        if self.fast_forward {
+            // Drop fast-forward audio so the queues never hold sped-up backlog
+            let audio = &self.m.bus.cdic.audio;
+            for q in [&audio.sample_queue, &audio.sfx_queue] {
+                if let Ok(mut q) = q.lock() {
+                    q.clear();
+                }
+            }
+        }
+        // While fast-forwarding, present at most about 60 times a second
+        let due = !self.fast_forward || self.last_present.elapsed() >= Duration::from_millis(16);
+        if let Some(window) = self.window.as_ref().filter(|_| !self.occluded && due) {
             window.request_redraw();
         }
 
@@ -1055,6 +1133,7 @@ impl App {
         if surface.resize(w, h).is_err() {
             return;
         }
+        self.last_present = Instant::now();
         let (dw, dh) = (size.width as usize, size.height as usize);
         self.image_rect = image_rect(dw, dh);
         if let Ok(mut buffer) = surface.buffer_mut() {
@@ -1162,8 +1241,13 @@ impl ApplicationHandler for App {
         if self.window.is_none() || el.exiting() {
             return;
         }
+        let ff = self.host_input && self.focused && self.key(Key::Space) && !self.bound(Key::Space);
+        if ff != self.fast_forward {
+            self.fast_forward = ff;
+            info!("Fast-forward: {}", if ff { "ON" } else { "OFF" });
+        }
         let now = Instant::now();
-        if now < self.run_at {
+        if !ff && now < self.run_at {
             let remaining = self.run_at - now;
             if remaining > Duration::from_millis(2) {
                 el.set_control_flow(ControlFlow::WaitUntil(self.run_at - Duration::from_millis(1)));
@@ -1177,13 +1261,40 @@ impl ApplicationHandler for App {
             el.exit();
             return;
         }
-        self.schedule_next();
-        el.set_control_flow(ControlFlow::WaitUntil(self.run_at));
+        if ff {
+            // Uncapped: next frame as soon as pending events are handled
+            let now = Instant::now();
+            self.run_at = now;
+            self.next_frame_time = now + self.m.bus.mcd212.video_mode.frame_duration();
+            el.set_control_flow(ControlFlow::Poll);
+        } else {
+            self.schedule_next();
+            el.set_control_flow(ControlFlow::WaitUntil(self.run_at));
+        }
     }
 
     fn exiting(&mut self, _el: &ActiveEventLoop) {
         // Restore host cursor and release mouse confinement on exit
         self.mouse_captured = false;
         self.apply_grab();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn letterbox_matches_aspect_stretch() {
+        assert_eq!(image_rect(768, 560), (0, 0, 768, 560));
+        assert_eq!(image_rect(1920, 1080), (219, 0, 1481, 1080));
+        assert_eq!(image_rect(768, 1000), (0, 220, 768, 560));
+        let src: Vec<u32> = (0..(SCREEN_WIDTH * SCREEN_HEIGHT) as u32).collect();
+        let mut dst = vec![1u32; SCREEN_WIDTH * SCREEN_HEIGHT];
+        blit_aspect(&mut dst, SCREEN_WIDTH, SCREEN_HEIGHT, &src, image_rect(SCREEN_WIDTH, SCREEN_HEIGHT));
+        assert_eq!(dst, src);
+        let mut big = vec![1u32; 1536 * 1120];
+        blit_aspect(&mut big, 1536, 1120, &src, image_rect(1536, 1120));
+        assert_eq!(big[1536 * 3 + 5], src[SCREEN_WIDTH + 2]);
     }
 }

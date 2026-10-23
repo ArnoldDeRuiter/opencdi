@@ -1,7 +1,15 @@
 // OpenCDi Release Build - 2026-09-29 15:45
 use std::path::{Path, PathBuf};
 use log::{info, error};
-use minifb::{Key, Window, WindowOptions};
+use std::collections::HashSet;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+use winit::application::ApplicationHandler;
+use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode as Key, ModifiersState, PhysicalKey};
+use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use opencdi::audio::HostAudioOutput;
 use opencdi::frontend::{pop_action, push_action, GuiAction, InputDeviceMode, KeyBindings};
@@ -11,26 +19,8 @@ use opencdi::machine::Machine;
 use opencdi::mcd212::{SCREEN_WIDTH, SCREEN_HEIGHT, VideoMode};
 
 #[cfg(target_os = "windows")]
-#[repr(C)]
-struct RECT {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-}
-
-#[cfg(target_os = "windows")]
-#[repr(C)]
-struct POINT {
-    x: i32,
-    y: i32,
-}
-
-#[cfg(target_os = "windows")]
 #[link(name = "winmm")]
 unsafe extern "system" {
-    fn ShowWindow(hwnd: *mut std::ffi::c_void, n_cmd_show: i32) -> i32;
-    fn IsZoomed(hwnd: *mut std::ffi::c_void) -> i32;
     fn timeBeginPeriod(uPeriod: u32) -> u32;
     fn timeEndPeriod(uPeriod: u32) -> u32;
 }
@@ -38,57 +28,8 @@ unsafe extern "system" {
 #[cfg(target_os = "windows")]
 #[link(name = "user32")]
 unsafe extern "system" {
-    fn ShowCursor(b_show: i32) -> i32;
-    fn ClipCursor(lp_rect: *const RECT) -> i32;
-    fn GetClientRect(hwnd: *mut std::ffi::c_void, lp_rect: *mut RECT) -> i32;
-    fn ClientToScreen(hwnd: *mut std::ffi::c_void, lp_point: *mut POINT) -> i32;
     fn MessageBoxW(hwnd: *mut std::ffi::c_void, lptext: *const u16, lpcaption: *const u16, utype: u32) -> i32;
 }
-
-#[cfg(target_os = "windows")]
-fn set_cursor_visibility(visible: bool, is_currently_hidden: &mut bool) {
-    unsafe {
-        if !visible && !*is_currently_hidden {
-            while ShowCursor(0) >= 0 {}
-            *is_currently_hidden = true;
-        } else if visible && *is_currently_hidden {
-            while ShowCursor(1) < 0 {}
-            *is_currently_hidden = false;
-        }
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn set_cursor_visibility(_visible: bool, _is_currently_hidden: &mut bool) {}
-
-#[cfg(target_os = "windows")]
-fn set_mouse_confinement(confined: bool, hwnd: *mut std::ffi::c_void, is_currently_clipped: &mut bool) {
-    unsafe {
-        if confined && !hwnd.is_null() {
-            let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-            GetClientRect(hwnd, &mut rect);
-            let mut tl = POINT { x: rect.left, y: rect.top };
-            let mut br = POINT { x: rect.right, y: rect.bottom };
-            ClientToScreen(hwnd, &mut tl);
-            ClientToScreen(hwnd, &mut br);
-            let screen_rect = RECT {
-                left: tl.x,
-                top: tl.y,
-                right: br.x,
-                bottom: br.y,
-            };
-            ClipCursor(&screen_rect);
-            *is_currently_clipped = true;
-        } else if !confined && *is_currently_clipped {
-            ClipCursor(std::ptr::null());
-            *is_currently_clipped = false;
-        }
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn set_mouse_confinement(_confined: bool, _hwnd: *mut std::ffi::c_void, _is_currently_clipped: &mut bool) {}
-
 
 fn find_file(relative_subpath: &str) -> Option<PathBuf> {
     let sub = Path::new(relative_subpath);
@@ -176,25 +117,6 @@ fn find_nvram_file() -> Option<PathBuf> {
         }
     }
     None
-}
-
-fn toggle_fullscreen(window: &Window) {
-    #[cfg(target_os = "windows")]
-    {
-        let hwnd = window.get_window_handle();
-        if !hwnd.is_null() {
-            let is_max = unsafe { IsZoomed(hwnd) } != 0;
-            unsafe {
-                ShowWindow(hwnd, if is_max { 9 } else { 3 });
-            }
-            info!("Schermo intero: {}", if is_max { "FINESTRA" } else { "SCHERMO INTERO (4:3)" });
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = window;
-        info!("Fullscreen toggle is Windows-only; maximise or resize the window instead");
-    }
 }
 
 fn save_screenshot(frame_count: u64, framebuffer: &[u32]) {
@@ -371,99 +293,265 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     m.reset();
     info!("CPU SCC68070 reset - PC: 0x{:08X}", m.cpu.pc);
 
-    // 5. Create Display Window
-    let mut window = Window::new(
-        "OpenCDi - Philips CD-i",
-        SCREEN_WIDTH,
-        SCREEN_HEIGHT,
-        WindowOptions {
-            resize: true,
-            scale: minifb::Scale::X1,
-            scale_mode: minifb::ScaleMode::AspectRatioStretch,
-            ..WindowOptions::default()
-        },
-    )?;
+    // 5. Initialize Controls Configuration
+    let bindings = KeyBindings::new();
+    let input_device_mode = if has_flag("--mouse") { InputDeviceMode::Mouse } else { InputDeviceMode::Gamepad };
 
-    window.limit_update_rate(None);
-
-    // 6. Initialize Controls Configuration
-    let mut bindings = KeyBindings::new();
-    let mut input_device_mode = if has_flag("--mouse") { InputDeviceMode::Mouse } else { InputDeviceMode::Gamepad };
-
-    // 7. Attach Native Win32 Menu GUI
-    #[cfg(target_os = "windows")]
-    {
-        let hwnd = window.get_window_handle();
-        gui::attach_gui_menu(hwnd, bindings.profile, input_device_mode, m.bus.mcd212.video_mode);
-        gui::update_dvc_menu(m.bus.dvc.is_fitted());
-    }
-
-    // 8. Initialize Host Audio Playback
-    let _host_audio = HostAudioOutput::try_start(
+    // 6. Initialize Host Audio Playback
+    let host_audio = HostAudioOutput::try_start(
         m.bus.cdic.audio.sample_queue.clone(),
         m.bus.cdic.audio.sfx_queue.clone(),
         m.bus.cdic.audio.source_rate.clone(),
     );
 
-    // 9. Initialize USB Gamepad subsystem (Gilrs / XInput / DirectInput)
-    let mut gilrs = gilrs::Gilrs::new().ok();
+    // 7. Initialize USB Gamepad subsystem (Gilrs / XInput / DirectInput)
+    let gilrs = gilrs::Gilrs::new().ok();
     if gilrs.is_some() {
         info!("USB Gamepad subsystem active (Xbox / PlayStation / Generic USB)");
     }
 
-    let mut frame_count: u64 = 0;
-    let mut frames_run: u64 = 0;
-    let mut disc_launched = false;
-    let mut shell_ready_count: u32 = 0;
-
-    let mut pad_x: i32 = if m.bus.cdrom.is_some() { 575 } else { 384 };
-    let mut pad_y: i32 = if m.bus.cdrom.is_some() { 335 } else { 280 };
-    let mut pad_x_f: f32 = pad_x as f32;
-    let mut pad_y_f: f32 = pad_y as f32;
-    let mut pad_active = false;
     m.bus.emulate_wait_states = true; // Authentic hardware wait-states (15.5 MHz)
-    let mut mouse_captured = true;
-    let mut host_cursor_hidden = false;
-    let mut mouse_clipped = false;
-    let mut prev_mx: f32 = -1.0;
-    let mut prev_my: f32 = -1.0;
-    let mut prev_middle = false;
-    let mut prev_f11 = false;
-    let mut prev_s = false;
-    let mut prev_m = false;
-    let mut prev_ctrl_o = false;
-    let mut prev_ctrl_i = false;
-    let mut prev_f5 = false;
-    let mut prev_key_btn: u8 = 0;
+    let (pad_x, pad_y) = if m.bus.cdrom.is_some() { (575, 335) } else { (384, 280) };
+    let prev_vsr = (m.bus.mcd212.get_vsr::<0>(), m.bus.mcd212.get_vsr::<1>());
+    let now = Instant::now();
+    let mut app = App {
+        m,
+        bindings,
+        input_device_mode,
+        dvc_disabled,
+        max_frames,
+        current_game_name,
+        window: None,
+        surface: None,
+        image_rect: (0, 0, SCREEN_WIDTH, SCREEN_HEIGHT),
+        _host_audio: host_audio,
+        gilrs,
+        keys: HashSet::new(),
+        mods: ModifiersState::empty(),
+        focused: false,
+        cursor: None,
+        mouse_left: false,
+        mouse_right: false,
+        mouse_middle: false,
+        prev_middle: false,
+        mouse_captured: true,
+        host_input: !has_flag("--no-host-input"),
+        occluded: false,
+        grab_applied: None,
+        frame_count: 0,
+        frames_run: 0,
+        disc_launched: false,
+        shell_ready_count: 0,
+        pad_x,
+        pad_y,
+        pad_x_f: pad_x as f32,
+        pad_y_f: pad_y as f32,
+        prev_key_btn: 0,
+        run_at: now,
+        next_frame_time: now,
+        fps_timer: now,
+        measured_fps: 50.0,
+        prev_instructions: 0,
+        prev_cd_sectors: 0,
+        prev_vsr,
+        buffer_flips_interval: 0,
+        measured_render_fps: 0.0,
+        measured_mips: 0.0,
+        measured_cd_rate: 0.0,
+    };
 
     info!("Emulation loop started. Use menu or shortcuts: [Ctrl+I] Insert Disc, [Ctrl+O] Open & Reset, [F5] Reset, [F11] Fullscreen, [Middle Click] Capture/Release Mouse");
 
-    let mut fps_timer = std::time::Instant::now();
-    let mut measured_fps = 50.0f64;
-    let mut next_frame_time = std::time::Instant::now();
+    let event_loop = EventLoop::new()?;
+    event_loop.run_app(&mut app)?;
 
-    let mut prev_instructions: u64 = 0;
-    let mut prev_cd_sectors: u32 = 0;
-    let mut prev_vsr = (m.bus.mcd212.get_vsr::<0>(), m.bus.mcd212.get_vsr::<1>());
-    let mut buffer_flips_interval: u32 = 0;
-    let mut measured_render_fps: f64 = 0.0;
-    let mut measured_mips: f64 = 0.0;
-    let mut measured_cd_rate: f64 = 0.0;
+    #[cfg(target_os = "windows")]
+    unsafe {
+        timeEndPeriod(1);
+    }
 
-    while window.is_open() && !window.is_key_down(Key::Escape) {
-        // Handle GUI Actions from Native Win32 Menu
-        let mut exit_requested = false;
+    info!("Emulation stopped. Final PC: 0x{:08X}", app.m.cpu.pc);
+    Ok(())
+}
+
+// Letterbox rectangle (x, y, w, h) of the CD-i picture in a dst_w x dst_h surface, as minifb's AspectRatioStretch computes it
+fn image_rect(dst_w: usize, dst_h: usize) -> (usize, usize, usize, usize) {
+    if dst_w == 0 || dst_h == 0 {
+        return (0, 0, 0, 0);
+    }
+    let buffer_aspect = SCREEN_WIDTH as f32 / SCREEN_HEIGHT as f32;
+    let win_aspect = dst_w as f32 / dst_h as f32;
+    if buffer_aspect > win_aspect {
+        let h = ((dst_w as f32 / buffer_aspect) as usize).clamp(1, dst_h);
+        (0, (dst_h - h) / 2, dst_w, h)
+    } else {
+        let w = ((dst_h as f32 * buffer_aspect) as usize).clamp(1, dst_w);
+        ((dst_w - w) / 2, 0, w, dst_h)
+    }
+}
+
+// Nearest-neighbour stretch with black bars, same 10-bit fixed-point stepping as minifb's scaler
+fn blit_aspect(dst: &mut [u32], dst_w: usize, dst_h: usize, src: &[u32], rect: (usize, usize, usize, usize)) {
+    dst.fill(0);
+    let (x0, y0, w, h) = rect;
+    if w == 0 || h == 0 {
+        return;
+    }
+    let step_x = ((SCREEN_WIDTH as f32 / w as f32) * 1024.0) as usize;
+    let step_y = ((SCREEN_HEIGHT as f32 / h as f32) * 1024.0) as usize;
+    let mut fixed_y = 0usize;
+    for row in dst.chunks_exact_mut(dst_w).skip(y0).take(h.min(dst_h - y0)) {
+        let src_row = &src[(fixed_y >> 10).min(SCREEN_HEIGHT - 1) * SCREEN_WIDTH..][..SCREEN_WIDTH];
+        let mut fixed_x = 0usize;
+        for px in &mut row[x0..x0 + w] {
+            *px = src_row[(fixed_x >> 10).min(SCREEN_WIDTH - 1)];
+            fixed_x += step_x;
+        }
+        fixed_y += step_y;
+    }
+}
+
+struct App {
+    m: Machine,
+    bindings: KeyBindings,
+    input_device_mode: InputDeviceMode,
+    dvc_disabled: bool,
+    max_frames: Option<u64>,
+    current_game_name: String,
+    window: Option<Rc<Window>>,
+    surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
+    image_rect: (usize, usize, usize, usize),
+    _host_audio: Option<HostAudioOutput>,
+    gilrs: Option<gilrs::Gilrs>,
+    keys: HashSet<Key>,
+    mods: ModifiersState,
+    focused: bool,
+    cursor: Option<PhysicalPosition<f64>>,
+    mouse_left: bool,
+    mouse_right: bool,
+    mouse_middle: bool,
+    prev_middle: bool,
+    mouse_captured: bool,
+    host_input: bool,
+    occluded: bool,
+    grab_applied: Option<bool>,
+    frame_count: u64,
+    frames_run: u64,
+    disc_launched: bool,
+    shell_ready_count: u32,
+    pad_x: i32,
+    pad_y: i32,
+    pad_x_f: f32,
+    pad_y_f: f32,
+    prev_key_btn: u8,
+    run_at: Instant,
+    next_frame_time: Instant,
+    fps_timer: Instant,
+    measured_fps: f64,
+    prev_instructions: u64,
+    prev_cd_sectors: u32,
+    prev_vsr: (u32, u32),
+    buffer_flips_interval: u32,
+    measured_render_fps: f64,
+    measured_mips: f64,
+    measured_cd_rate: f64,
+}
+
+impl App {
+    fn key(&self, k: Key) -> bool {
+        self.keys.contains(&k)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn hwnd(&self) -> *mut std::ffi::c_void {
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        self.window
+            .as_ref()
+            .and_then(|w| w.window_handle().ok())
+            .and_then(|h| match h.as_raw() {
+                RawWindowHandle::Win32(h) => Some(h.hwnd.get() as *mut std::ffi::c_void),
+                _ => None,
+            })
+            .unwrap_or(std::ptr::null_mut())
+    }
+
+    fn toggle_fullscreen(&self) {
+        if let Some(window) = &self.window {
+            let full = window.fullscreen().is_none();
+            window.set_fullscreen(if full { Some(Fullscreen::Borderless(None)) } else { None });
+            info!("Schermo intero: {}", if full { "SCHERMO INTERO" } else { "FINESTRA" });
+        }
+    }
+
+    fn reset_state(&mut self) {
+        self.frame_count = 0;
+        self.disc_launched = false;
+        self.shell_ready_count = 0;
+        self.pad_x = if self.m.bus.cdrom.is_some() { 575 } else { 384 };
+        self.pad_y = if self.m.bus.cdrom.is_some() { 335 } else { 280 };
+        self.pad_x_f = self.pad_x as f32;
+        self.pad_y_f = self.pad_y as f32;
+    }
+
+    // Hide and confine the host cursor while captured and focused (Win32 ShowCursor/ClipCursor before)
+    fn apply_grab(&mut self) {
+        let Some(window) = &self.window else { return };
+        let want = self.host_input && self.focused && self.mouse_captured;
+        if self.grab_applied == Some(want) {
+            return;
+        }
+        self.grab_applied = Some(want);
+        window.set_cursor_visible(!want);
+        let mode = if want { CursorGrabMode::Confined } else { CursorGrabMode::None };
+        if let Err(e) = window.set_cursor_grab(mode) {
+            info!("Cursor grab {:?} not available: {}", mode, e);
+        }
+    }
+
+    fn open_dialog_action(&self, open_and_reset: bool) {
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(path) = gui::open_file_dialog(self.hwnd()) {
+                push_action(if open_and_reset { GuiAction::OpenDisc(path) } else { GuiAction::InsertDisc(path) });
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = open_and_reset;
+            info!("No file dialog on this platform: pass the disc path on the command line");
+        }
+    }
+
+    fn on_key_pressed(&mut self, el: &ActiveEventLoop, code: Key) {
+        let ctrl = self.mods.control_key();
+        match code {
+            Key::Escape => el.exit(),
+            Key::KeyI if ctrl => self.open_dialog_action(false),
+            Key::KeyO if ctrl => self.open_dialog_action(true),
+            Key::F5 => push_action(GuiAction::Reset),
+            Key::F11 => self.toggle_fullscreen(),
+            Key::F12 => save_screenshot(self.frame_count, &self.m.bus.mcd212.framebuffer[..]),
+            Key::KeyM => {
+                self.m.bus.cdic.audio.muted = !self.m.bus.cdic.audio.muted;
+                info!("Audio: {}", if self.m.bus.cdic.audio.muted { "MUTED" } else { "UNMUTED" });
+            }
+            _ => {}
+        }
+    }
+
+    // Returns false when the loop must stop
+    fn handle_actions(&mut self) -> bool {
         while let Some(action) = pop_action() {
             match action {
                 GuiAction::InsertDisc(path) => {
                     info!("Hot-swapping disc into CD-i drive: {:?}", path);
-                    match m.bus.change_disc(&path) {
+                    match self.m.bus.change_disc(&path) {
                         Ok(_) => {
-                            current_game_name = path
+                            self.current_game_name = path
                                 .file_stem()
                                 .map(|s| s.to_string_lossy().to_string())
                                 .unwrap_or_else(|| "CD-i Disc".to_string());
-                            info!("New disc inserted successfully: {}", current_game_name);
+                            info!("New disc inserted successfully: {}", self.current_game_name);
                         }
                         Err(e) => {
                             error!("Failed to hot-swap disc {:?}: {:?}", path, e);
@@ -472,17 +560,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 GuiAction::OpenDisc(path) => {
                     info!("Loading and booting new disc (Reset): {:?}", path);
-                    match m.bus.load_cdrom(&path) {
+                    match self.m.bus.load_cdrom(&path) {
                         Ok(_) => {
-                            current_game_name = path
+                            self.current_game_name = path
                                 .file_stem()
                                 .map(|s| s.to_string_lossy().to_string())
                                 .unwrap_or_else(|| "CD-i Disc".to_string());
-                            info!("Disc loaded successfully: {}", current_game_name);
+                            info!("Disc loaded successfully: {}", self.current_game_name);
 
-                            if !dvc_disabled && !m.bus.dvc.is_fitted() {
+                            if !self.dvc_disabled && !self.m.bus.dvc.is_fitted() {
                                 if let Some(dvc_path) = find_dvc_rom() {
-                                    if let Ok(_) = m.bus.load_dvc_rom(&dvc_path) {
+                                    if let Ok(_) = self.m.bus.load_dvc_rom(&dvc_path) {
                                         info!("Loaded Digital Video Cartridge (DVC) extension from {:?}", dvc_path);
                                         #[cfg(target_os = "windows")]
                                         gui::update_dvc_menu(true);
@@ -490,33 +578,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
 
-                            let name_upper = current_game_name.to_uppercase();
+                            let name_upper = self.current_game_name.to_uppercase();
                             let is_ntsc = (name_upper.contains("(USA)") || name_upper.contains("(JAPAN)") || name_upper.contains("NTSC"))
-                                && m.bus.cdrom.as_ref().map_or(true, |cd| cd.disc_type != 0x20);
+                                && self.m.bus.cdrom.as_ref().map_or(true, |cd| cd.disc_type != 0x20);
                             let mode = if is_ntsc {
                                 info!("Detected NTSC disc (USA/Japan): auto-configured NTSC 60 Hz video mode");
                                 VideoMode::Ntsc
                             } else {
                                 VideoMode::Pal
                             };
-                            m.bus.set_video_mode(mode);
+                            self.m.bus.set_video_mode(mode);
                             #[cfg(target_os = "windows")]
                             gui::update_video_menu(mode);
 
-                            m.bus.reset_system();
-                            m.cpu.reset(&mut m.bus);
-                            frame_count = 0;
-                            disc_launched = false;
-                            shell_ready_count = 0;
-                            pad_x = 575;
-                            pad_y = 335;
-                            pad_x_f = 575.0;
-                            pad_y_f = 335.0;
-                            pad_active = false;
-                            mouse_captured = true;
-                            m.bus.emulate_wait_states = true;
-                            next_frame_time = std::time::Instant::now();
-                            fps_timer = std::time::Instant::now();
+                            self.m.bus.reset_system();
+                            self.m.cpu.reset(&mut self.m.bus);
+                            self.reset_state();
+                            self.mouse_captured = true;
+                            self.m.bus.emulate_wait_states = true;
+                            self.next_frame_time = Instant::now();
+                            self.fps_timer = Instant::now();
                         }
                         Err(e) => {
                             error!("Failed to load disc {:?}: {:?}", path, e);
@@ -525,97 +606,89 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 GuiAction::EjectDisc => {
                     info!("Ejecting disc from CD-i drive");
-                    m.bus.slave.set_disc_inserted(false);
-                    m.bus.cdrom = None;
-                    disc_launched = false;
-                    shell_ready_count = 0;
-                    current_game_name = "No disc inserted (Standalone BIOS)".to_string();
-                    pad_x = 384;
-                    pad_y = 280;
-                    pad_x_f = 384.0;
-                    pad_y_f = 280.0;
+                    self.m.bus.slave.set_disc_inserted(false);
+                    self.m.bus.cdrom = None;
+                    self.disc_launched = false;
+                    self.shell_ready_count = 0;
+                    self.current_game_name = "No disc inserted (Standalone BIOS)".to_string();
+                    self.pad_x = 384;
+                    self.pad_y = 280;
+                    self.pad_x_f = 384.0;
+                    self.pad_y_f = 280.0;
                 }
                 GuiAction::Reset => {
                     info!("Console reset requested");
-                    m.bus.reset_system();
-                    m.cpu.reset(&mut m.bus);
-                    frame_count = 0;
-                    disc_launched = false;
-                    shell_ready_count = 0;
-                    pad_x = if m.bus.cdrom.is_some() { 575 } else { 384 };
-                    pad_y = if m.bus.cdrom.is_some() { 335 } else { 280 };
-                    pad_x_f = pad_x as f32;
-                    pad_y_f = pad_y as f32;
-                    pad_active = false;
-                    mouse_captured = true;
-                    m.bus.emulate_wait_states = true;
-                    next_frame_time = std::time::Instant::now();
-                    fps_timer = std::time::Instant::now();
+                    self.m.bus.reset_system();
+                    self.m.cpu.reset(&mut self.m.bus);
+                    self.reset_state();
+                    self.mouse_captured = true;
+                    self.m.bus.emulate_wait_states = true;
+                    self.next_frame_time = Instant::now();
+                    self.fps_timer = Instant::now();
                 }
                 GuiAction::Exit => {
                     info!("Exit requested from File menu");
-                    exit_requested = true;
-                    break;
+                    return false;
                 }
                 GuiAction::SetProfile(profile) => {
-                    bindings.set_profile(profile);
+                    self.bindings.set_profile(profile);
                     #[cfg(target_os = "windows")]
-                    gui::update_profile_menu(bindings.profile);
-                    info!("Control profile updated to: {:?}", bindings.profile);
+                    gui::update_profile_menu(self.bindings.profile);
+                    info!("Control profile updated to: {:?}", self.bindings.profile);
                 }
                 GuiAction::SetInputDevice(mode) => {
-                    input_device_mode = mode;
+                    self.input_device_mode = mode;
                     #[cfg(target_os = "windows")]
                     gui::update_input_device_menu(mode);
                     info!("Input device mode set to: {:?}", mode);
                 }
                 GuiAction::ReloadControls => {
-                    bindings.load_from_ini();
+                    self.bindings.load_from_ini();
                     #[cfg(target_os = "windows")]
-                    gui::update_profile_menu(bindings.profile);
-                    info!("Controls reloaded from INI file. Profile: {:?}", bindings.profile);
+                    gui::update_profile_menu(self.bindings.profile);
+                    info!("Controls reloaded from INI file. Profile: {:?}", self.bindings.profile);
                 }
                 GuiAction::ToggleReleaseMouse => {
-                    mouse_captured = !mouse_captured;
-                    info!("Mouse capture: {}", if mouse_captured { "CAPTURED" } else { "RELEASED" });
+                    self.mouse_captured = !self.mouse_captured;
+                    info!("Mouse capture: {}", if self.mouse_captured { "CAPTURED" } else { "RELEASED" });
                 }
                 GuiAction::ToggleMute => {
-                    m.bus.cdic.audio.muted = !m.bus.cdic.audio.muted;
-                    info!("Audio: {}", if m.bus.cdic.audio.muted { "MUTED" } else { "UNMUTED" });
+                    self.m.bus.cdic.audio.muted = !self.m.bus.cdic.audio.muted;
+                    info!("Audio: {}", if self.m.bus.cdic.audio.muted { "MUTED" } else { "UNMUTED" });
                 }
                 GuiAction::VolumeUp => {
-                    m.bus.cdic.audio.volume = (m.bus.cdic.audio.volume + 0.05).min(2.0);
+                    self.m.bus.cdic.audio.volume = (self.m.bus.cdic.audio.volume + 0.05).min(2.0);
                 }
                 GuiAction::VolumeDown => {
-                    m.bus.cdic.audio.volume = (m.bus.cdic.audio.volume - 0.05).max(0.0);
+                    self.m.bus.cdic.audio.volume = (self.m.bus.cdic.audio.volume - 0.05).max(0.0);
                 }
                 GuiAction::ToggleFullscreen => {
-                    toggle_fullscreen(&window);
+                    self.toggle_fullscreen();
                 }
                 GuiAction::TakeScreenshot => {
-                    save_screenshot(frame_count, &m.bus.mcd212.framebuffer[..]);
+                    save_screenshot(self.frame_count, &self.m.bus.mcd212.framebuffer[..]);
                 }
                 GuiAction::SetVideoMode(mode) => {
-                    m.bus.set_video_mode(mode);
+                    self.m.bus.set_video_mode(mode);
                     #[cfg(target_os = "windows")]
                     gui::update_video_menu(mode);
                     info!("Video mode set to: {:?}", mode);
                 }
                 GuiAction::ToggleWaitStates => {
-                    m.bus.emulate_wait_states = !m.bus.emulate_wait_states;
+                    self.m.bus.emulate_wait_states = !self.m.bus.emulate_wait_states;
                     #[cfg(target_os = "windows")]
-                    gui::update_waitstates_menu(m.bus.emulate_wait_states);
-                    info!("Authentic Hardware Speed (Wait-States): {}", if m.bus.emulate_wait_states { "ENABLED (Authentic CD-i 220)" } else { "DISABLED (Turbo Zero-Wait)" });
+                    gui::update_waitstates_menu(self.m.bus.emulate_wait_states);
+                    info!("Authentic Hardware Speed (Wait-States): {}", if self.m.bus.emulate_wait_states { "ENABLED (Authentic CD-i 220)" } else { "DISABLED (Turbo Zero-Wait)" });
                 }
                 GuiAction::ToggleDvc => {
-                    if m.bus.dvc.is_fitted() {
+                    if self.m.bus.dvc.is_fitted() {
                         info!("Removing Digital Video Cartridge (Base CD-i mode)");
-                        m.bus.dvc = opencdi::dvc::Dvc::new();
+                        self.m.bus.dvc = opencdi::dvc::Dvc::new();
                         #[cfg(target_os = "windows")]
                         gui::update_dvc_menu(false);
                     } else {
                         if let Some(dvc_path) = find_dvc_rom() {
-                            if let Ok(_) = m.bus.load_dvc_rom(&dvc_path) {
+                            if let Ok(_) = self.m.bus.load_dvc_rom(&dvc_path) {
                                 info!("Inserted Digital Video Cartridge (DVC) from {:?}", dvc_path);
                                 #[cfg(target_os = "windows")]
                                 gui::update_dvc_menu(true);
@@ -624,34 +697,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             error!("Cannot enable DVC: vmpega.rom not found in dvc/, bios/, or root directory");
                         }
                     }
-                    m.bus.reset_system();
-                    m.cpu.reset(&mut m.bus);
-                    frame_count = 0;
-                    disc_launched = false;
-                    shell_ready_count = 0;
-                    pad_x = if m.bus.cdrom.is_some() { 575 } else { 384 };
-                    pad_y = if m.bus.cdrom.is_some() { 335 } else { 280 };
-                    pad_x_f = pad_x as f32;
-                    pad_y_f = pad_y as f32;
-                    pad_active = false;
+                    self.m.bus.reset_system();
+                    self.m.cpu.reset(&mut self.m.bus);
+                    self.reset_state();
                 }
                 GuiAction::ShowHelp => {
                     #[cfg(target_os = "windows")]
-                    gui::show_controls_dialog(window.get_window_handle());
+                    gui::show_controls_dialog(self.hwnd());
                 }
                 GuiAction::ShowAbout => {
                     #[cfg(target_os = "windows")]
-                    gui::show_about_dialog(window.get_window_handle());
+                    gui::show_about_dialog(self.hwnd());
                 }
             }
         }
+        true
+    }
 
-        if exit_requested {
-            break;
-        }
-
+    fn autoplay(&mut self) {
         // Se un disco è presente, avvia automaticamente la riproduzione una sola volta quando la shell del BIOS è pronta
-        if m.bus.cdrom.is_some() && !disc_launched {
+        let m = &mut self.m;
+        if m.bus.cdrom.is_some() && !self.disc_launched {
             let (_effective_shell_base, shell_state) = if m.bus.dvc.is_fitted() {
                 let s_dvc = m.bus.peek_long(0x00D08090u32.wrapping_add(0xFFFF9172)).unwrap_or(0);
                 if s_dvc >= 2 {
@@ -664,156 +730,90 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             if shell_state >= 2 {
-                shell_ready_count += 1;
-                if shell_ready_count == 1 || shell_ready_count == 150 {
+                self.shell_ready_count += 1;
+                if self.shell_ready_count == 1 || self.shell_ready_count == 150 {
                     m.bus.slave.update_mouse(575, 335, 0);
-                } else if shell_ready_count == 30 || shell_ready_count == 180 {
+                } else if self.shell_ready_count == 30 || self.shell_ready_count == 180 {
                     info!("Shell BIOS pronta (stato {}): avvio automatico disco CD-i (click PLAY CD-I)...", shell_state);
                     m.bus.slave.update_mouse(575, 335, 1);
-                } else if shell_ready_count == 50 || shell_ready_count == 200 {
+                } else if self.shell_ready_count == 50 || self.shell_ready_count == 200 {
                     m.bus.slave.update_mouse(575, 335, 0);
                 }
             }
-            if ((m.cpu.pc >= 0x00010000 && m.cpu.pc < 0x00300000) || (m.cpu.pc >= 0x00D00000 && m.cpu.pc < 0x00E00000)) && frame_count > 250 {
+            if ((m.cpu.pc >= 0x00010000 && m.cpu.pc < 0x00300000) || (m.cpu.pc >= 0x00D00000 && m.cpu.pc < 0x00E00000)) && self.frame_count > 250 {
                 info!("Applicazione disco in esecuzione in RAM (PC=0x{:06X}), controllo passato all'utente.", m.cpu.pc);
-                disc_launched = true;
+                self.disc_launched = true;
                 m.bus.emulate_wait_states = true;
-                pad_x = 384;
-                pad_y = 280;
-                pad_x_f = 384.0;
-                pad_y_f = 280.0;
+                self.pad_x = 384;
+                self.pad_y = 280;
+                self.pad_x_f = 384.0;
+                self.pad_y_f = 280.0;
                 m.bus.slave.update_mouse(384, 280, 0);
             }
         }
+    }
 
-        m.run_frame();
-
-        let curr_vsr = (m.bus.mcd212.get_vsr::<0>(), m.bus.mcd212.get_vsr::<1>());
-        if curr_vsr != prev_vsr {
-            prev_vsr = curr_vsr;
-            buffer_flips_interval += 1;
-        }
-
-        let is_active = window.is_active();
-        let hwnd = window.get_window_handle();
-
-        // Host cursor hiding and confinement
-        if is_active && mouse_captured {
-            set_cursor_visibility(false, &mut host_cursor_hidden);
-            set_mouse_confinement(true, hwnd, &mut mouse_clipped);
-        } else {
-            set_cursor_visibility(true, &mut host_cursor_hidden);
-            set_mouse_confinement(false, hwnd, &mut mouse_clipped);
-        }
-
-        // Keyboard Shortcut: Ctrl+I (Inserisci Disco a caldo)
-        let ctrl_down = window.is_key_down(Key::LeftCtrl) || window.is_key_down(Key::RightCtrl);
-        let i_down = window.is_key_down(Key::I);
-        if is_active && ctrl_down && i_down && !prev_ctrl_i {
-            #[cfg(target_os = "windows")]
-            {
-                if let Some(path) = gui::open_file_dialog(hwnd) {
-                    push_action(GuiAction::InsertDisc(path));
-                }
-            }
-            #[cfg(not(target_os = "windows"))]
-            info!("No file dialog on this platform: pass the disc path on the command line");
-        }
-        prev_ctrl_i = ctrl_down && i_down;
-
-        // Keyboard Shortcut: Ctrl+O (Apri Gioco e Riavvia)
-        let o_down = window.is_key_down(Key::O);
-        if is_active && ctrl_down && o_down && !prev_ctrl_o {
-            #[cfg(target_os = "windows")]
-            {
-                if let Some(path) = gui::open_file_dialog(hwnd) {
-                    push_action(GuiAction::OpenDisc(path));
-                }
-            }
-            #[cfg(not(target_os = "windows"))]
-            info!("No file dialog on this platform: pass the disc path on the command line");
-        }
-        prev_ctrl_o = ctrl_down && o_down;
-
-        // Keyboard Shortcut: F5 (Reset)
-        let f5_down = window.is_key_down(Key::F5);
-        if is_active && f5_down && !prev_f5 {
-            push_action(GuiAction::Reset);
-        }
-        prev_f5 = f5_down;
-
-        // F11 Fullscreen toggle
-        let f11_down = window.is_key_down(Key::F11);
-        if is_active && f11_down && !prev_f11 {
-            toggle_fullscreen(&window);
-        }
-        prev_f11 = f11_down;
+    // Keyboard, gamepad and host mouse into the slave controller, once per emulated frame
+    fn update_input(&mut self) {
+        let is_active = self.focused && self.host_input;
 
         // Middle mouse button (rotellina/tasto centrale): toggle mouse capture / release focus
-        let middle_down = window.get_mouse_down(minifb::MouseButton::Middle);
-        if is_active && middle_down && !prev_middle {
-            mouse_captured = !mouse_captured;
-            info!("Controllo mouse: {}", if mouse_captured { "CATTURATO (focus console, puntatore host nascosto)" } else { "LIBERO (puntatore desktop visibile, rotellina o clic per ricatturare)" });
+        if is_active && self.mouse_middle && !self.prev_middle {
+            self.mouse_captured = !self.mouse_captured;
+            info!("Controllo mouse: {}", if self.mouse_captured { "CATTURATO (focus console, puntatore host nascosto)" } else { "LIBERO (puntatore desktop visibile, rotellina o clic per ricatturare)" });
         }
-        prev_middle = middle_down;
+        self.prev_middle = self.mouse_middle;
 
         // Left click inside window re-captures mouse if released
-        if is_active && !mouse_captured && window.get_mouse_down(minifb::MouseButton::Left) {
-            mouse_captured = true;
+        if is_active && !self.mouse_captured && self.mouse_left && self.cursor.is_some() {
+            self.mouse_captured = true;
             info!("Controllo mouse: CATTURATO (focus console, puntatore host nascosto)");
         }
+        self.apply_grab();
 
         // Directional state from Keyboard (Arrow keys, WASD, or current profile)
+        let b = &self.bindings;
         let mut dir_x: i32 = 0;
         let mut dir_y: i32 = 0;
-        let mut user_input_active = false;
-
-        if is_active {
-            if window.is_key_down(bindings.left) || window.is_key_down(Key::Left) || window.is_key_down(Key::A) {
-                dir_x -= 1;
-                user_input_active = true;
-            }
-            if window.is_key_down(bindings.right) || window.is_key_down(Key::Right) || window.is_key_down(Key::D) {
-                dir_x += 1;
-                user_input_active = true;
-            }
-            if window.is_key_down(bindings.up) || window.is_key_down(Key::Up) || window.is_key_down(Key::W) {
-                dir_y -= 1;
-                user_input_active = true;
-            }
-            if window.is_key_down(bindings.down) || window.is_key_down(Key::Down) || window.is_key_down(Key::S) {
-                dir_y += 1;
-                user_input_active = true;
-            }
-        }
-
-        // Button 1 (Action / Sword / Start) and Button 2 (Jump / Secondary)
         let mut key_btn = 0;
+
         if is_active {
-            if window.is_key_down(bindings.btn1)
-                || window.is_key_down(Key::Space)
-                || window.is_key_down(Key::Enter)
-                || window.is_key_down(Key::Z)
-                || window.is_key_down(Key::J)
+            if self.key(b.left) || self.key(Key::ArrowLeft) || self.key(Key::KeyA) {
+                dir_x -= 1;
+            }
+            if self.key(b.right) || self.key(Key::ArrowRight) || self.key(Key::KeyD) {
+                dir_x += 1;
+            }
+            if self.key(b.up) || self.key(Key::ArrowUp) || self.key(Key::KeyW) {
+                dir_y -= 1;
+            }
+            if self.key(b.down) || self.key(Key::ArrowDown) || self.key(Key::KeyS) {
+                dir_y += 1;
+            }
+
+            // Button 1 (Action / Sword / Start) and Button 2 (Jump / Secondary)
+            if self.key(b.btn1)
+                || self.key(Key::Space)
+                || self.key(Key::Enter)
+                || self.key(Key::KeyZ)
+                || self.key(Key::KeyJ)
             {
                 key_btn |= 1;
-                user_input_active = true;
             }
-            if window.is_key_down(bindings.btn2)
-                || window.is_key_down(Key::LeftShift)
-                || window.is_key_down(Key::RightShift)
-                || window.is_key_down(Key::X)
-                || window.is_key_down(Key::K)
+            if self.key(b.btn2)
+                || self.key(Key::ShiftLeft)
+                || self.key(Key::ShiftRight)
+                || self.key(Key::KeyX)
+                || self.key(Key::KeyK)
             {
                 key_btn |= 2;
-                user_input_active = true;
             }
         }
 
         // Gamepad handling via Gilrs (Xbox / PlayStation / USB)
-        if let Some(ref mut g) = gilrs {
+        if let Some(ref mut g) = self.gilrs {
             while let Some(_) = g.next_event() {} // Drain events to refresh state
-            for (_id, gamepad) in g.gamepads() {
+            for (_id, gamepad) in g.gamepads().filter(|_| self.host_input) {
                 if gamepad.is_connected() {
                     let mut pad_dir_x = 0;
                     let mut pad_dir_y = 0;
@@ -849,207 +849,341 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         else if ly < -0.35 { pad_dir_y = 1; }
                     }
 
-                    if pad_dir_x != 0 {
-                        dir_x += pad_dir_x;
-                        user_input_active = true;
-                    }
-                    if pad_dir_y != 0 {
-                        dir_y += pad_dir_y;
-                        user_input_active = true;
-                    }
+                    dir_x += pad_dir_x;
+                    dir_y += pad_dir_y;
 
                     // Button 1: South (A / Cross)
                     if gamepad.is_pressed(gilrs::Button::South) {
                         key_btn |= 1;
-                        user_input_active = true;
                     }
                     // Button 2: East (B / Circle) or West (X / Square) -> Jump
                     if gamepad.is_pressed(gilrs::Button::East) || gamepad.is_pressed(gilrs::Button::West) {
                         key_btn |= 2;
-                        user_input_active = true;
                     }
                     // Start Button -> Confirm / Action
                     if gamepad.is_pressed(gilrs::Button::Start) {
                         key_btn |= 1;
-                        user_input_active = true;
                     }
                 }
             }
         }
 
-        // Mouse pointer handling: detect physical mouse movement or click
+        // Mouse pointer: host cursor mapped through the letterbox onto the 768x560 picture
         let mut mouse_btn = 0;
-        let mut mouse_x = pad_x;
-        let mut mouse_y = pad_y;
+        let mut mouse_x = self.pad_x;
+        let mut mouse_y = self.pad_y;
 
-        if is_active && mouse_captured {
-            if let Some((mx, my)) = window.get_mouse_pos(minifb::MouseMode::Discard) {
-                if window.get_mouse_down(minifb::MouseButton::Left) { mouse_btn |= 1; }
-                if window.get_mouse_down(minifb::MouseButton::Right) { mouse_btn |= 2; }
+        if is_active && self.mouse_captured {
+            if let Some(pos) = self.cursor {
+                if self.mouse_left { mouse_btn |= 1; }
+                if self.mouse_right { mouse_btn |= 2; }
 
-                mouse_x = (mx.round() as i32).clamp(0, 767);
-                mouse_y = (my.round() as i32).clamp(0, 559);
-                prev_mx = mx;
-                prev_my = my;
+                let (x0, y0, w, h) = self.image_rect;
+                if w > 0 && h > 0 {
+                    let mx = (pos.x - x0 as f64) * SCREEN_WIDTH as f64 / w as f64;
+                    let my = (pos.y - y0 as f64) * SCREEN_HEIGHT as f64 / h as f64;
+                    mouse_x = (mx.round() as i32).clamp(0, 767);
+                    mouse_y = (my.round() as i32).clamp(0, 559);
+                }
             }
         }
 
+        let m = &mut self.m;
         if m.bus.slave.device_mouse_updated {
-            pad_x = m.bus.slave.device_mouse_x;
-            pad_y = m.bus.slave.device_mouse_y;
-            pad_x_f = pad_x as f32;
-            pad_y_f = pad_y as f32;
+            self.pad_x = m.bus.slave.device_mouse_x;
+            self.pad_y = m.bus.slave.device_mouse_y;
+            self.pad_x_f = self.pad_x as f32;
+            self.pad_y_f = self.pad_y as f32;
             m.bus.slave.device_mouse_updated = false;
         }
 
-        if !disc_launched && m.bus.cdrom.is_some() {
+        if !self.disc_launched && m.bus.cdrom.is_some() {
             // During automatic boot sequence, do not let host mouse drift override PLAY CD-I auto-click
         } else {
-            match input_device_mode {
+            match self.input_device_mode {
                 InputDeviceMode::Gamepad => {
                     const PAD_SPEED: f32 = 2.5;
                     let mut moved = false;
                     if dir_x != 0 {
-                        pad_x_f = (pad_x_f + (dir_x.clamp(-1, 1) as f32) * PAD_SPEED).clamp(0.0, 767.0);
-                        pad_x = pad_x_f.round() as i32;
+                        self.pad_x_f = (self.pad_x_f + (dir_x.clamp(-1, 1) as f32) * PAD_SPEED).clamp(0.0, 767.0);
+                        self.pad_x = self.pad_x_f.round() as i32;
                         moved = true;
                     }
                     if dir_y != 0 {
-                        pad_y_f = (pad_y_f + (dir_y.clamp(-1, 1) as f32) * PAD_SPEED).clamp(0.0, 559.0);
-                        pad_y = pad_y_f.round() as i32;
+                        self.pad_y_f = (self.pad_y_f + (dir_y.clamp(-1, 1) as f32) * PAD_SPEED).clamp(0.0, 559.0);
+                        self.pad_y = self.pad_y_f.round() as i32;
                         moved = true;
                     }
-                    if moved || key_btn != prev_key_btn {
-                        m.bus.slave.update_mouse(pad_x, pad_y, key_btn);
+                    if moved || key_btn != self.prev_key_btn {
+                        m.bus.slave.update_mouse(self.pad_x, self.pad_y, key_btn);
                     }
-                    prev_key_btn = key_btn;
+                    self.prev_key_btn = key_btn;
                 }
                 InputDeviceMode::Mouse => {
-                    pad_x = mouse_x;
-                    pad_y = mouse_y;
-                    pad_x_f = mouse_x as f32;
-                    pad_y_f = mouse_y as f32;
-                    m.bus.slave.update_mouse(pad_x, pad_y, mouse_btn | key_btn);
+                    self.pad_x = mouse_x;
+                    self.pad_y = mouse_y;
+                    self.pad_x_f = mouse_x as f32;
+                    self.pad_y_f = mouse_y as f32;
+                    m.bus.slave.update_mouse(self.pad_x, self.pad_y, mouse_btn | key_btn);
                 }
             }
         }
 
-        // Screenshot hotkey (F12)
-        let s_pressed = window.is_key_down(Key::F12);
-        if s_pressed && !prev_s {
-            save_screenshot(frame_count, &m.bus.mcd212.framebuffer[..]);
+        // Audio hotkeys (+ / - = Volume, held)
+        let audio = &mut self.m.bus.cdic.audio;
+        if self.keys.contains(&Key::Equal) || self.keys.contains(&Key::NumpadAdd) {
+            audio.volume = (audio.volume + 0.02).min(2.0);
         }
-        prev_s = s_pressed;
-
-        // Audio hotkeys (M = Mute/Unmute, + / - = Volume)
-        let m_pressed = window.is_key_down(Key::M);
-        if m_pressed && !prev_m {
-            m.bus.cdic.audio.muted = !m.bus.cdic.audio.muted;
-            info!("Audio: {}", if m.bus.cdic.audio.muted { "MUTED" } else { "UNMUTED" });
+        if self.keys.contains(&Key::Minus) || self.keys.contains(&Key::NumpadSubtract) {
+            audio.volume = (audio.volume - 0.02).max(0.0);
         }
-        prev_m = m_pressed;
+    }
 
-        if window.is_key_down(Key::Equal) || window.is_key_down(Key::NumPadPlus) {
-            m.bus.cdic.audio.volume = (m.bus.cdic.audio.volume + 0.02).min(2.0);
-        }
-        if window.is_key_down(Key::Minus) || window.is_key_down(Key::NumPadMinus) {
-            m.bus.cdic.audio.volume = (m.bus.cdic.audio.volume - 0.02).max(0.0);
-        }
-
-        // Precision host frame pacing (prevents fast-forward catchup bursts and frame-time oscillation)
-        let target_frame_duration = m.bus.mcd212.video_mode.frame_duration();
-        window.update_with_buffer(&m.bus.mcd212.framebuffer[..], SCREEN_WIDTH, SCREEN_HEIGHT)?;
-        let now = std::time::Instant::now();
-
-        if now < next_frame_time {
-            let remaining = next_frame_time - now;
-            if remaining > std::time::Duration::from_millis(2) {
-                std::thread::sleep(remaining - std::time::Duration::from_millis(1));
-            }
-            while std::time::Instant::now() < next_frame_time {
-                std::hint::spin_loop();
-            }
-            next_frame_time += target_frame_duration;
-        } else {
-            // Drop backlog immediately so emulation never bursts at host CPU speed
-            next_frame_time = now + target_frame_duration;
-        }
-
-        frame_count += 1;
+    fn update_telemetry(&mut self) {
+        let m = &self.m;
         let fps_interval = if m.bus.mcd212.video_mode == VideoMode::Pal { 25 } else { 30 };
-        if frame_count % fps_interval == 0 {
-            let elapsed_secs = fps_timer.elapsed().as_secs_f64();
-            if elapsed_secs > 0.0 {
-                measured_fps = (fps_interval as f64) / elapsed_secs;
-                let inst_delta = m.instructions.saturating_sub(prev_instructions);
-                measured_mips = (inst_delta as f64 / elapsed_secs) / 1_000_000.0;
-                prev_instructions = m.instructions;
+        if self.frame_count % fps_interval != 0 {
+            return;
+        }
+        let elapsed_secs = self.fps_timer.elapsed().as_secs_f64();
+        if elapsed_secs > 0.0 {
+            self.measured_fps = (fps_interval as f64) / elapsed_secs;
+            let inst_delta = m.instructions.saturating_sub(self.prev_instructions);
+            self.measured_mips = (inst_delta as f64 / elapsed_secs) / 1_000_000.0;
+            self.prev_instructions = m.instructions;
 
-                let curr_sectors = m.bus.cdic.curr_lba;
-                let sec_delta = curr_sectors.saturating_sub(prev_cd_sectors);
-                measured_cd_rate = sec_delta as f64 / elapsed_secs;
-                prev_cd_sectors = curr_sectors;
+            let curr_sectors = m.bus.cdic.curr_lba;
+            let sec_delta = curr_sectors.saturating_sub(self.prev_cd_sectors);
+            self.measured_cd_rate = sec_delta as f64 / elapsed_secs;
+            self.prev_cd_sectors = curr_sectors;
 
-                measured_render_fps = (buffer_flips_interval as f64) / elapsed_secs;
-                buffer_flips_interval = 0;
-            }
-            fps_timer = std::time::Instant::now();
+            self.measured_render_fps = (self.buffer_flips_interval as f64) / elapsed_secs;
+            self.buffer_flips_interval = 0;
+        }
+        self.fps_timer = Instant::now();
 
-            let target_fps = m.bus.mcd212.video_mode.fps();
-            let speed_pct = (measured_fps / target_fps) * 100.0;
+        let target_fps = m.bus.mcd212.video_mode.fps();
+        let speed_pct = (self.measured_fps / target_fps) * 100.0;
 
-            // Real-Time Anomaly Detector
-            if frame_count > 100 && (speed_pct > 108.0 || (speed_pct < 92.0 && speed_pct > 20.0)) {
-                log::warn!(
-                    "[TELEMETRY SPEED ANOMALY] Speed: {:.1}% ({:.1} FPS on target {:.0} Hz) | MIPS: {:.2} | CD: {:.1} sec/s",
-                    speed_pct, measured_fps, target_fps, measured_mips, measured_cd_rate
-                );
-            }
-            if measured_mips > 4.5 && m.bus.emulate_wait_states {
-                log::warn!(
-                    "[TELEMETRY CPU ANOMALY] Unexpected CPU throughput: {:.2} MIPS (expected ~3.2-3.5 MIPS for SCC68070 at 15.5MHz)",
-                    measured_mips
-                );
-            }
+        // Real-Time Anomaly Detector
+        if self.frame_count > 100 && (speed_pct > 108.0 || (speed_pct < 92.0 && speed_pct > 20.0)) {
+            log::warn!(
+                "[TELEMETRY SPEED ANOMALY] Speed: {:.1}% ({:.1} FPS on target {:.0} Hz) | MIPS: {:.2} | CD: {:.1} sec/s",
+                speed_pct, self.measured_fps, target_fps, self.measured_mips, self.measured_cd_rate
+            );
+        }
+        if self.measured_mips > 4.5 && m.bus.emulate_wait_states {
+            log::warn!(
+                "[TELEMETRY CPU ANOMALY] Unexpected CPU throughput: {:.2} MIPS (expected ~3.2-3.5 MIPS for SCC68070 at 15.5MHz)",
+                self.measured_mips
+            );
+        }
 
-            let video_mode = match m.bus.mcd212.video_mode {
-                VideoMode::Pal => "50Hz (PAL)",
-                VideoMode::Ntsc => "60Hz (NTSC)",
-            };
-            let wait_status = if m.bus.emulate_wait_states { "ON" } else { "TURBO" };
-            let cd_speed_x = measured_cd_rate / 75.0;
-            let cd_str = if measured_cd_rate > 0.5 {
-                format!("{:.1} sec/s ({:.1}x)", measured_cd_rate, cd_speed_x)
-            } else {
-                "IDLE".to_string()
-            };
-            let render_str = if measured_render_fps > 0.5 {
-                format!("{:.0} FPS", measured_render_fps)
-            } else {
-                format!("{:.0} FPS", measured_fps)
-            };
+        let video_mode = match m.bus.mcd212.video_mode {
+            VideoMode::Pal => "50Hz (PAL)",
+            VideoMode::Ntsc => "60Hz (NTSC)",
+        };
+        let wait_status = if m.bus.emulate_wait_states { "ON" } else { "TURBO" };
+        let cd_speed_x = self.measured_cd_rate / 75.0;
+        let cd_str = if self.measured_cd_rate > 0.5 {
+            format!("{:.1} sec/s ({:.1}x)", self.measured_cd_rate, cd_speed_x)
+        } else {
+            "IDLE".to_string()
+        };
+        let render_str = if self.measured_render_fps > 0.5 {
+            format!("{:.0} FPS", self.measured_render_fps)
+        } else {
+            format!("{:.0} FPS", self.measured_fps)
+        };
+        if let Some(window) = &self.window {
             window.set_title(&format!(
                 "OpenCDi – {} | {:.0}% ({:.1} FPS {}) | CPU: {:.2} MIPS | CD: {} | Render: {} | WaitStates: {}",
-                current_game_name, speed_pct, measured_fps, video_mode, measured_mips, cd_str, render_str, wait_status
+                self.current_game_name, speed_pct, self.measured_fps, video_mode, self.measured_mips, cd_str, render_str, wait_status
             ));
         }
+    }
 
-        frames_run += 1;
-        if max_frames.is_some_and(|n| frames_run >= n) {
-            info!("Stopping after {} frames (--frames)", frames_run);
-            break;
+    // One emulated frame plus host input; returns false when the loop must stop
+    fn tick(&mut self) -> bool {
+        if !self.handle_actions() {
+            return false;
+        }
+        self.autoplay();
+        self.m.run_frame();
+
+        let curr_vsr = (self.m.bus.mcd212.get_vsr::<0>(), self.m.bus.mcd212.get_vsr::<1>());
+        if curr_vsr != self.prev_vsr {
+            self.prev_vsr = curr_vsr;
+            self.buffer_flips_interval += 1;
+        }
+
+        self.update_input();
+        // Emulation runs on the timer; only the picture is skipped while the window is hidden
+        if let Some(window) = self.window.as_ref().filter(|_| !self.occluded) {
+            window.request_redraw();
+        }
+
+        self.frame_count += 1;
+        self.update_telemetry();
+
+        self.frames_run += 1;
+        if self.max_frames.is_some_and(|n| self.frames_run >= n) {
+            info!("Stopping after {} frames (--frames)", self.frames_run);
+            return false;
+        }
+        true
+    }
+
+    // Precision host frame pacing: frames start on a fixed schedule, a late frame drops the backlog
+    fn schedule_next(&mut self) {
+        let target_frame_duration = self.m.bus.mcd212.video_mode.frame_duration();
+        let now = Instant::now();
+        if now < self.next_frame_time {
+            self.run_at = self.next_frame_time;
+            self.next_frame_time += target_frame_duration;
+        } else {
+            // Drop backlog immediately so emulation never bursts at host CPU speed
+            self.run_at = now;
+            self.next_frame_time = now + target_frame_duration;
         }
     }
 
-    // Restore host cursor and release mouse confinement on exit
-    set_cursor_visibility(true, &mut host_cursor_hidden);
-    set_mouse_confinement(false, window.get_window_handle(), &mut mouse_clipped);
+    fn present(&mut self) {
+        let (Some(window), Some(surface)) = (&self.window, &mut self.surface) else { return };
+        let size = window.inner_size();
+        let (Some(w), Some(h)) = (std::num::NonZeroU32::new(size.width), std::num::NonZeroU32::new(size.height)) else { return };
+        if surface.resize(w, h).is_err() {
+            return;
+        }
+        let (dw, dh) = (size.width as usize, size.height as usize);
+        self.image_rect = image_rect(dw, dh);
+        if let Ok(mut buffer) = surface.buffer_mut() {
+            blit_aspect(&mut buffer, dw, dh, &self.m.bus.mcd212.framebuffer[..], self.image_rect);
+            let _ = buffer.present();
+        }
+    }
+}
 
-    #[cfg(target_os = "windows")]
-    unsafe {
-        timeEndPeriod(1);
+impl ApplicationHandler for App {
+    fn resumed(&mut self, el: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+        let attrs = Window::default_attributes()
+            .with_title("OpenCDi - Philips CD-i")
+            .with_inner_size(LogicalSize::new(SCREEN_WIDTH as f64, SCREEN_HEIGHT as f64))
+            .with_resizable(true);
+        let window = match el.create_window(attrs) {
+            Ok(w) => Rc::new(w),
+            Err(e) => {
+                error!("Cannot create the window: {}", e);
+                el.exit();
+                return;
+            }
+        };
+        let surface = softbuffer::Context::new(window.clone()).and_then(|ctx| softbuffer::Surface::new(&ctx, window.clone()));
+        match surface {
+            Ok(s) => self.surface = Some(s),
+            Err(e) => {
+                error!("Cannot create the drawing surface: {}", e);
+                el.exit();
+                return;
+            }
+        }
+        let size = window.inner_size();
+        self.image_rect = image_rect(size.width as usize, size.height as usize);
+        self.focused = window.has_focus();
+        self.window = Some(window);
+
+        // Attach Native Win32 Menu GUI
+        #[cfg(target_os = "windows")]
+        {
+            gui::attach_gui_menu(self.hwnd(), self.bindings.profile, self.input_device_mode, self.m.bus.mcd212.video_mode);
+            gui::update_dvc_menu(self.m.bus.dvc.is_fitted());
+        }
+        let now = Instant::now();
+        self.run_at = now;
+        self.next_frame_time = now;
+        self.fps_timer = now;
     }
 
-    info!("Emulation stopped. Final PC: 0x{:08X}", m.cpu.pc);
-    Ok(())
+    fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::RedrawRequested => self.present(),
+            WindowEvent::Resized(size) => {
+                self.image_rect = image_rect(size.width as usize, size.height as usize);
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::Focused(f) => {
+                self.focused = f;
+                if !f {
+                    self.keys.clear();
+                    self.mouse_left = false;
+                    self.mouse_right = false;
+                    self.mouse_middle = false;
+                }
+                self.apply_grab();
+            }
+            WindowEvent::Occluded(o) => self.occluded = o,
+            // --no-host-input: keyboard and mouse never reach the emulator or the shortcuts
+            WindowEvent::KeyboardInput { .. } | WindowEvent::MouseInput { .. } if !self.host_input => {}
+            WindowEvent::ModifiersChanged(mods) => self.mods = mods.state(),
+            WindowEvent::KeyboardInput { event, .. } => {
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    if event.state == ElementState::Pressed {
+                        self.keys.insert(code);
+                        if !event.repeat {
+                            self.on_key_pressed(el, code);
+                        }
+                    } else {
+                        self.keys.remove(&code);
+                    }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => self.cursor = Some(position),
+            WindowEvent::CursorLeft { .. } => self.cursor = None,
+            WindowEvent::MouseInput { state, button, .. } => {
+                let down = state == ElementState::Pressed;
+                match button {
+                    MouseButton::Left => self.mouse_left = down,
+                    MouseButton::Right => self.mouse_right = down,
+                    MouseButton::Middle => self.mouse_middle = down,
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        if self.window.is_none() || el.exiting() {
+            return;
+        }
+        let now = Instant::now();
+        if now < self.run_at {
+            let remaining = self.run_at - now;
+            if remaining > Duration::from_millis(2) {
+                el.set_control_flow(ControlFlow::WaitUntil(self.run_at - Duration::from_millis(1)));
+                return;
+            }
+            while Instant::now() < self.run_at {
+                std::hint::spin_loop();
+            }
+        }
+        if !self.tick() {
+            el.exit();
+            return;
+        }
+        self.schedule_next();
+        el.set_control_flow(ControlFlow::WaitUntil(self.run_at));
+    }
+
+    fn exiting(&mut self, _el: &ActiveEventLoop) {
+        // Restore host cursor and release mouse confinement on exit
+        self.mouse_captured = false;
+        self.apply_grab();
+    }
 }

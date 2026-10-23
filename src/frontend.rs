@@ -2,7 +2,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 use log::info;
-use minifb::Key;
+use winit::keyboard::KeyCode as Key;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputProfile {
@@ -20,56 +20,56 @@ pub enum InputDeviceMode {
 
 pub fn key_to_string(key: Key) -> &'static str {
     match key {
-        Key::Up => "Up",
-        Key::Down => "Down",
-        Key::Left => "Left",
-        Key::Right => "Right",
-        Key::A => "A",
-        Key::B => "B",
-        Key::C => "C",
-        Key::D => "D",
-        Key::E => "E",
-        Key::F => "F",
-        Key::G => "G",
-        Key::H => "H",
-        Key::I => "I",
-        Key::J => "J",
-        Key::K => "K",
-        Key::L => "L",
-        Key::M => "M",
-        Key::N => "N",
-        Key::O => "O",
-        Key::P => "P",
-        Key::Q => "Q",
-        Key::R => "R",
-        Key::S => "S",
-        Key::T => "T",
-        Key::U => "U",
-        Key::V => "V",
-        Key::W => "W",
-        Key::X => "X",
-        Key::Y => "Y",
-        Key::Z => "Z",
+        Key::ArrowUp => "Up",
+        Key::ArrowDown => "Down",
+        Key::ArrowLeft => "Left",
+        Key::ArrowRight => "Right",
+        Key::KeyA => "A",
+        Key::KeyB => "B",
+        Key::KeyC => "C",
+        Key::KeyD => "D",
+        Key::KeyE => "E",
+        Key::KeyF => "F",
+        Key::KeyG => "G",
+        Key::KeyH => "H",
+        Key::KeyI => "I",
+        Key::KeyJ => "J",
+        Key::KeyK => "K",
+        Key::KeyL => "L",
+        Key::KeyM => "M",
+        Key::KeyN => "N",
+        Key::KeyO => "O",
+        Key::KeyP => "P",
+        Key::KeyQ => "Q",
+        Key::KeyR => "R",
+        Key::KeyS => "S",
+        Key::KeyT => "T",
+        Key::KeyU => "U",
+        Key::KeyV => "V",
+        Key::KeyW => "W",
+        Key::KeyX => "X",
+        Key::KeyY => "Y",
+        Key::KeyZ => "Z",
         Key::Space => "Space",
         Key::Enter => "Enter",
-        Key::LeftShift => "LeftShift",
-        Key::RightShift => "RightShift",
-        Key::LeftCtrl => "LeftCtrl",
-        Key::RightCtrl => "RightCtrl",
-        Key::LeftAlt => "LeftAlt",
-        Key::RightAlt => "RightAlt",
+        Key::ShiftLeft => "LeftShift",
+        Key::ShiftRight => "RightShift",
+        Key::ControlLeft => "LeftCtrl",
+        Key::ControlRight => "RightCtrl",
+        Key::AltLeft => "LeftAlt",
+        Key::AltRight => "RightAlt",
         Key::Tab => "Tab",
         Key::Backspace => "Backspace",
-        Key::NumPad0 => "NumPad0",
-        Key::NumPad1 => "NumPad1",
-        Key::NumPad2 => "NumPad2",
-        Key::NumPad3 => "NumPad3",
-        Key::NumPad4 => "NumPad4",
-        Key::NumPad5 => "NumPad5",
-        Key::NumPad6 => "NumPad6",
-        Key::NumPad7 => "NumPad7",
-        Key::NumPad8 => "NumPad8",
-        Key::NumPad9 => "NumPad9",
+        Key::Numpad0 => "NumPad0",
+        Key::Numpad1 => "NumPad1",
+        Key::Numpad2 => "NumPad2",
+        Key::Numpad3 => "NumPad3",
+        Key::Numpad4 => "NumPad4",
+        Key::Numpad5 => "NumPad5",
+        Key::Numpad6 => "NumPad6",
+        Key::Numpad7 => "NumPad7",
+        Key::Numpad8 => "NumPad8",
+        Key::Numpad9 => "NumPad9",
         _ => "Z",
     }
 }
@@ -77,56 +77,68 @@ pub fn key_to_string(key: Key) -> &'static str {
 pub fn string_to_key(s: &str) -> Option<Key> {
     let s_upper = s.trim().to_uppercase();
     match s_upper.as_str() {
-        "UP" => Some(Key::Up),
-        "DOWN" => Some(Key::Down),
-        "LEFT" => Some(Key::Left),
-        "RIGHT" => Some(Key::Right),
-        "A" => Some(Key::A),
-        "B" => Some(Key::B),
-        "C" => Some(Key::C),
-        "D" => Some(Key::D),
-        "E" => Some(Key::E),
-        "F" => Some(Key::F),
-        "G" => Some(Key::G),
-        "H" => Some(Key::H),
-        "I" => Some(Key::I),
-        "J" => Some(Key::J),
-        "K" => Some(Key::K),
-        "L" => Some(Key::L),
-        "M" => Some(Key::M),
-        "N" => Some(Key::N),
-        "O" => Some(Key::O),
-        "P" => Some(Key::P),
-        "Q" => Some(Key::Q),
-        "R" => Some(Key::R),
-        "S" => Some(Key::S),
-        "T" => Some(Key::T),
-        "U" => Some(Key::U),
-        "V" => Some(Key::V),
-        "W" => Some(Key::W),
-        "X" => Some(Key::X),
-        "Y" => Some(Key::Y),
-        "Z" => Some(Key::Z),
+        "UP" => Some(Key::ArrowUp),
+        "DOWN" => Some(Key::ArrowDown),
+        "LEFT" => Some(Key::ArrowLeft),
+        "RIGHT" => Some(Key::ArrowRight),
+        "A" => Some(Key::KeyA),
+        "B" => Some(Key::KeyB),
+        "C" => Some(Key::KeyC),
+        "D" => Some(Key::KeyD),
+        "E" => Some(Key::KeyE),
+        "F" => Some(Key::KeyF),
+        "G" => Some(Key::KeyG),
+        "H" => Some(Key::KeyH),
+        "I" => Some(Key::KeyI),
+        "J" => Some(Key::KeyJ),
+        "K" => Some(Key::KeyK),
+        "L" => Some(Key::KeyL),
+        "M" => Some(Key::KeyM),
+        "N" => Some(Key::KeyN),
+        "O" => Some(Key::KeyO),
+        "P" => Some(Key::KeyP),
+        "Q" => Some(Key::KeyQ),
+        "R" => Some(Key::KeyR),
+        "S" => Some(Key::KeyS),
+        "T" => Some(Key::KeyT),
+        "U" => Some(Key::KeyU),
+        "V" => Some(Key::KeyV),
+        "W" => Some(Key::KeyW),
+        "X" => Some(Key::KeyX),
+        "Y" => Some(Key::KeyY),
+        "Z" => Some(Key::KeyZ),
         "SPACE" => Some(Key::Space),
         "ENTER" | "RETURN" => Some(Key::Enter),
-        "LEFTSHIFT" | "SHIFT" => Some(Key::LeftShift),
-        "RIGHTSHIFT" => Some(Key::RightShift),
-        "LEFTCTRL" | "CTRL" => Some(Key::LeftCtrl),
-        "RIGHTCTRL" => Some(Key::RightCtrl),
-        "LEFTALT" | "ALT" => Some(Key::LeftAlt),
-        "RIGHTALT" => Some(Key::RightAlt),
+        "LEFTSHIFT" | "SHIFT" => Some(Key::ShiftLeft),
+        "RIGHTSHIFT" => Some(Key::ShiftRight),
+        "LEFTCTRL" | "CTRL" => Some(Key::ControlLeft),
+        "RIGHTCTRL" => Some(Key::ControlRight),
+        "LEFTALT" | "ALT" => Some(Key::AltLeft),
+        "RIGHTALT" => Some(Key::AltRight),
         "TAB" => Some(Key::Tab),
         "BACKSPACE" => Some(Key::Backspace),
-        "NUMPAD0" | "KP0" | "0" => Some(Key::NumPad0),
-        "NUMPAD1" | "KP1" | "1" => Some(Key::NumPad1),
-        "NUMPAD2" | "KP2" | "2" => Some(Key::NumPad2),
-        "NUMPAD3" | "KP3" | "3" => Some(Key::NumPad3),
-        "NUMPAD4" | "KP4" | "4" => Some(Key::NumPad4),
-        "NUMPAD5" | "KP5" | "5" => Some(Key::NumPad5),
-        "NUMPAD6" | "KP6" | "6" => Some(Key::NumPad6),
-        "NUMPAD7" | "KP7" | "7" => Some(Key::NumPad7),
-        "NUMPAD8" | "KP8" | "8" => Some(Key::NumPad8),
-        "NUMPAD9" | "KP9" | "9" => Some(Key::NumPad9),
+        "NUMPAD0" | "KP0" | "0" => Some(Key::Numpad0),
+        "NUMPAD1" | "KP1" | "1" => Some(Key::Numpad1),
+        "NUMPAD2" | "KP2" | "2" => Some(Key::Numpad2),
+        "NUMPAD3" | "KP3" | "3" => Some(Key::Numpad3),
+        "NUMPAD4" | "KP4" | "4" => Some(Key::Numpad4),
+        "NUMPAD5" | "KP5" | "5" => Some(Key::Numpad5),
+        "NUMPAD6" | "KP6" | "6" => Some(Key::Numpad6),
+        "NUMPAD7" | "KP7" | "7" => Some(Key::Numpad7),
+        "NUMPAD8" | "KP8" | "8" => Some(Key::Numpad8),
+        "NUMPAD9" | "KP9" | "9" => Some(Key::Numpad9),
+        "ARROWUP" => Some(Key::ArrowUp),
+        "ARROWDOWN" => Some(Key::ArrowDown),
+        "ARROWLEFT" => Some(Key::ArrowLeft),
+        "ARROWRIGHT" => Some(Key::ArrowRight),
+        "SHIFTLEFT" => Some(Key::ShiftLeft),
+        "SHIFTRIGHT" => Some(Key::ShiftRight),
+        "CONTROLLEFT" => Some(Key::ControlLeft),
+        "CONTROLRIGHT" => Some(Key::ControlRight),
+        "ALTLEFT" => Some(Key::AltLeft),
+        "ALTRIGHT" => Some(Key::AltRight),
+        // winit-style letter names such as KeyA
+        k if k.len() == 4 && k.starts_with("KEY") => string_to_key(&k[3..]),
         _ => None,
     }
 }
@@ -146,12 +158,12 @@ impl KeyBindings {
     pub fn new() -> Self {
         let mut bindings = Self {
             profile: InputProfile::Standard,
-            up: Key::Up,
-            down: Key::Down,
-            left: Key::Left,
-            right: Key::Right,
-            btn1: Key::Z,
-            btn2: Key::X,
+            up: Key::ArrowUp,
+            down: Key::ArrowDown,
+            left: Key::ArrowLeft,
+            right: Key::ArrowRight,
+            btn1: Key::KeyZ,
+            btn2: Key::KeyX,
         };
         bindings.load_from_ini();
         bindings
@@ -161,28 +173,28 @@ impl KeyBindings {
         self.profile = profile;
         match profile {
             InputProfile::Standard => {
-                self.up = Key::Up;
-                self.down = Key::Down;
-                self.left = Key::Left;
-                self.right = Key::Right;
-                self.btn1 = Key::Z;
-                self.btn2 = Key::X;
+                self.up = Key::ArrowUp;
+                self.down = Key::ArrowDown;
+                self.left = Key::ArrowLeft;
+                self.right = Key::ArrowRight;
+                self.btn1 = Key::KeyZ;
+                self.btn2 = Key::KeyX;
             }
             InputProfile::Wasd => {
-                self.up = Key::W;
-                self.down = Key::S;
-                self.left = Key::A;
-                self.right = Key::D;
-                self.btn1 = Key::J;
-                self.btn2 = Key::K;
+                self.up = Key::KeyW;
+                self.down = Key::KeyS;
+                self.left = Key::KeyA;
+                self.right = Key::KeyD;
+                self.btn1 = Key::KeyJ;
+                self.btn2 = Key::KeyK;
             }
             InputProfile::Numpad => {
-                self.up = Key::NumPad8;
-                self.down = Key::NumPad2;
-                self.left = Key::NumPad4;
-                self.right = Key::NumPad6;
-                self.btn1 = Key::NumPad1;
-                self.btn2 = Key::NumPad0;
+                self.up = Key::Numpad8;
+                self.down = Key::Numpad2;
+                self.left = Key::Numpad4;
+                self.right = Key::Numpad6;
+                self.btn1 = Key::Numpad1;
+                self.btn2 = Key::Numpad0;
             }
             InputProfile::Custom => {
                 // Keep custom key configuration intact

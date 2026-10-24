@@ -17,6 +17,7 @@ use opencdi::frontend::{pop_action, push_action, GuiAction, InputDeviceMode, Key
 use opencdi::gui;
 use opencdi::machine::Machine;
 use opencdi::mcd212::{SCREEN_WIDTH, SCREEN_HEIGHT, VideoMode};
+use opencdi::savestate::{Reader, State, StateError};
 
 #[cfg(target_os = "windows")]
 #[link(name = "winmm")]
@@ -150,6 +151,44 @@ fn save_screenshot(frame_count: u64, framebuffer: &[u32]) {
     if let Ok(_) = std::fs::write(&filename, &bmp) {
         info!("Screenshot salvato in {}", filename);
     }
+}
+
+// Savestates go into local/states when run from the repo, else states/ next to the binary
+fn states_dir() -> PathBuf {
+    if Path::new("local").is_dir() {
+        PathBuf::from("local").join("states")
+    } else {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("states")))
+            .unwrap_or_else(|| PathBuf::from("states"))
+    }
+}
+
+// RetroArch naming: slot 0 is <name>.state, slot N is <name>.stateN
+fn state_path(dir: &Path, game: &str, slot: u32) -> PathBuf {
+    let name: String = game.chars().map(|c| if c.is_alphanumeric() || " ()-_.,'&!".contains(c) { c } else { '_' }).collect();
+    let name = if name.is_empty() { "opencdi".to_string() } else { name };
+    if slot == 0 { dir.join(format!("{}.state", name)) } else { dir.join(format!("{}.state{}", name, slot)) }
+}
+
+// Written to a temporary file first so a crash never leaves a half-written slot
+fn write_state_file(path: &Path, m: &Machine, frontend: &[u8]) -> std::io::Result<usize> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut buf = Vec::new();
+    m.save_state(frontend, &mut buf);
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, &buf)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(buf.len())
+}
+
+// Returns the frontend bytes; the machine is unchanged on any error
+fn read_state_file(path: &Path, m: &mut Machine) -> Result<Vec<u8>, String> {
+    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    m.load_state(&data).map(|fe| fe.to_vec()).map_err(|e: StateError| e.to_string())
 }
 
 // F8: binary PPM (no image crate needed) into local/screenshots when run from the repo, else screenshots/ next to the binary
@@ -559,13 +598,54 @@ impl App {
         [b.up, b.down, b.left, b.right, b.btn1, b.btn2].contains(&k)
     }
 
-    // Savestate hooks: the save/load work plugs in here
+    // Host-side input and autoplay state saved alongside the machine so a load does not re-run autoplay clicks
+    fn frontend_state(&self) -> Vec<u8> {
+        let mut w = Vec::new();
+        (self.frame_count, self.disc_launched, self.shell_ready_count).save(&mut w);
+        (self.pad_x, self.pad_y, self.prev_key_btn).save(&mut w);
+        (self.pad_x_f, self.pad_y_f).save(&mut w);
+        w
+    }
+
+    fn set_frontend_state(&mut self, data: &[u8]) -> Result<(), StateError> {
+        let mut r = Reader::new(data);
+        let mut a = (self.frame_count, self.disc_launched, self.shell_ready_count);
+        let mut b = (self.pad_x, self.pad_y, self.prev_key_btn);
+        let mut c = (self.pad_x_f, self.pad_y_f);
+        a.load(&mut r)?;
+        b.load(&mut r)?;
+        c.load(&mut r)?;
+        (self.frame_count, self.disc_launched, self.shell_ready_count) = a;
+        (self.pad_x, self.pad_y, self.prev_key_btn) = b;
+        (self.pad_x_f, self.pad_y_f) = c;
+        Ok(())
+    }
+
+    fn state_file(&self) -> PathBuf {
+        state_path(&states_dir(), &self.current_game_name, self.state_slot)
+    }
+
     fn save_state(&mut self) {
-        info!("savestates not implemented yet (slot {})", self.state_slot);
+        let path = self.state_file();
+        match write_state_file(&path, &self.m, &self.frontend_state()) {
+            Ok(n) => info!("State slot {} saved to {:?} ({} bytes)", self.state_slot, path, n),
+            Err(e) => error!("State slot {} not saved to {:?}: {}", self.state_slot, path, e),
+        }
     }
 
     fn load_state(&mut self) {
-        info!("savestates not implemented yet (slot {})", self.state_slot);
+        let path = self.state_file();
+        match read_state_file(&path, &mut self.m) {
+            Ok(fe) => {
+                if let Err(e) = self.set_frontend_state(&fe) {
+                    error!("State slot {}: frontend section unreadable ({}); autoplay state kept", self.state_slot, e);
+                }
+                self.prev_instructions = self.m.instructions;
+                self.prev_cd_sectors = self.m.bus.cdic.curr_lba;
+                info!("State slot {} loaded from {:?}", self.state_slot, path);
+            }
+            Err(e) => error!("State slot {} not loaded from {:?}: {}", self.state_slot, path, e),
+        }
     }
 
     fn on_key_pressed(&mut self, el: &ActiveEventLoop, code: Key) {
@@ -589,7 +669,7 @@ impl App {
             Key::F4 => self.load_state(),
             Key::F6 | Key::F7 => {
                 self.state_slot = if code == Key::F6 { self.state_slot.saturating_sub(1) } else { (self.state_slot + 1).min(999) };
-                info!("State slot: {}", self.state_slot);
+                info!("State slot: {} ({:?})", self.state_slot, self.state_file());
             }
             Key::KeyM if !self.bound(code) => {
                 self.m.bus.cdic.audio.muted = !self.m.bus.cdic.audio.muted;
@@ -1057,8 +1137,8 @@ impl App {
         };
         if let Some(window) = &self.window {
             window.set_title(&format!(
-                "OpenCDi – {} | {:.0}% ({:.1} FPS {}) | CPU: {:.2} MIPS | CD: {} | Render: {} | WaitStates: {}",
-                self.current_game_name, speed_pct, self.measured_fps, video_mode, self.measured_mips, cd_str, render_str, wait_status
+                "OpenCDi – {} | {:.0}% ({:.1} FPS {}) | CPU: {:.2} MIPS | CD: {} | Render: {} | WaitStates: {} | Slot: {}",
+                self.current_game_name, speed_pct, self.measured_fps, video_mode, self.measured_mips, cd_str, render_str, wait_status, self.state_slot
             ));
         }
     }
@@ -1294,5 +1374,23 @@ mod tests {
         let mut big = vec![1u32; 1536 * 1120];
         blit_aspect(&mut big, 1536, 1120, &src, image_rect(1536, 1120));
         assert_eq!(big[1536 * 3 + 5], src[SCREEN_WIDTH + 2]);
+    }
+
+    #[test]
+    fn state_file_round_trip_and_names() {
+        let dir = std::env::temp_dir().join(format!("opencdi-state-test-{}", std::process::id()));
+        assert_eq!(state_path(&dir, "Hotel Mario (Europe)", 0), dir.join("Hotel Mario (Europe).state"));
+        assert_eq!(state_path(&dir, "a/b", 3), dir.join("a_b.state3"));
+        let mut m = Machine::new();
+        m.bus.sys_ram[7] = 0x5A;
+        let p = state_path(&dir, "test", 1);
+        write_state_file(&p, &m, b"front").unwrap();
+        let mut n = Machine::new();
+        assert_eq!(read_state_file(&p, &mut n).unwrap(), b"front");
+        assert_eq!(n.bus.sys_ram[7], 0x5A);
+        n.bus.rom[0] = 9;
+        assert!(read_state_file(&p, &mut n).is_err());
+        assert!(read_state_file(&state_path(&dir, "missing", 0), &mut n).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

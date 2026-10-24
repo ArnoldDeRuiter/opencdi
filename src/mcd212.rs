@@ -103,6 +103,7 @@ pub const TCR_MF1: u8 = 0x4;
 pub const TCR_MF0_KEY1: u8 = 0x5;
 pub const TCR_MF1_KEY1: u8 = 0x6;
 pub const TCR_DISABLE_MX: u32 = 0x0080_0000;
+pub const ICM_EV: u32 = 1 << 18;
 
 pub const CURCNT_COLOR: u32 = 0x0000_000F;
 pub const CURCNT_CUW: u32 = 0x0000_8000;
@@ -938,6 +939,8 @@ impl Mcd212 {
         let use_matte_flag = tp_ctrl_type >= TCR_MF0 && tp_ctrl_type <= TCR_MF1_KEY1;
         let is_dyuv_rgb = (icm == ICM_DYUV) || ((icm == ICM_RGB555) && (PATH == 1));
         let use_color_key = !is_dyuv_rgb && ((tp_ctrl_type == TCR_KEY) || (tp_ctrl_type == TCR_MF0_KEY1) || (tp_ctrl_type == TCR_MF1_KEY1));
+        // With external video on, a matte region keys the plane away only inside the DVC window.
+        let ext_keys = use_matte_flag && (self.image_coding_method & ICM_EV) != 0;
 
         if icm == ICM_DYUV {
             let mut x = 0;
@@ -978,7 +981,7 @@ impl Mcd212 {
 
             if use_matte_flag && !tp_always {
                 for i in 0..width {
-                    transparent[i] = self.matte_flag[matte_flag_index][i] == tp_check_parity;
+                    transparent[i] = self.matte_flag[matte_flag_index][i] == tp_check_parity && (!ext_keys || self.external_video_present[i]);
                 }
             } else {
                 transparent.fill(tp_always);
@@ -1035,9 +1038,9 @@ impl Mcd212 {
                         pixels[rl_index + 1] = color1;
                     }
                     if !fixed_tp {
-                        transparent[rl_index] = rgb_tp_bit || (use_color_key && color_match0) || (use_matte_flag && (self.matte_flag[matte_flag_index][rl_index] == tp_check_parity));
+                        transparent[rl_index] = rgb_tp_bit || (use_color_key && color_match0) || (use_matte_flag && (self.matte_flag[matte_flag_index][rl_index] == tp_check_parity) && (!ext_keys || self.external_video_present[rl_index]));
                         if rl_index + 1 < width {
-                            transparent[rl_index + 1] = rgb_tp_bit || (use_color_key && color_match1) || (use_matte_flag && (self.matte_flag[matte_flag_index][rl_index + 1] == tp_check_parity));
+                            transparent[rl_index + 1] = rgb_tp_bit || (use_color_key && color_match1) || (use_matte_flag && (self.matte_flag[matte_flag_index][rl_index + 1] == tp_check_parity) && (!ext_keys || self.external_video_present[rl_index + 1]));
                         }
                     }
                     rl_index += 2;

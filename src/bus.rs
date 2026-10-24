@@ -39,6 +39,7 @@ pub struct CdiBus {
     pub scc_uart_cmd: u8,
     pub scc_uart_tx_irq: bool,
     pub uart_capture: Option<Vec<u8>>, // Some: UART bytes are collected for the host instead of printed
+    pub dvc_audio_capture: Option<Vec<(f32, f32)>>, // Some: DVC PCM at dvc.audio_sample_rate goes here instead of the sample queue
     pub current_pc: u32,
     pub trace_setup: bool,
 
@@ -72,6 +73,7 @@ impl CdiBus {
             scc_uart_cmd: 0,
             scc_uart_tx_irq: false,
             uart_capture: None,
+            dvc_audio_capture: None,
             current_pc: 0,
             trace_setup: false,
 
@@ -278,7 +280,9 @@ impl CdiBus {
             self.dvc.vsync_hz = if self.mcd212.video_mode == crate::mcd212::VideoMode::Pal { 50.0 } else { 60.0 };
             self.dvc.on_vsync();
         }
-        if self.dvc.is_fitted() && !self.dvc.audio_out.is_empty() {
+        if let Some(cap) = self.dvc_audio_capture.as_mut() {
+            cap.extend(self.dvc.audio_out.drain(..));
+        } else if self.dvc.is_fitted() && !self.dvc.audio_out.is_empty() {
             if let Ok(mut q) = self.cdic.audio.sample_queue.lock() {
                 self.cdic.audio.source_rate.store(self.dvc.audio_sample_rate, std::sync::atomic::Ordering::Relaxed);
                 let max_samples = self.dvc.audio_sample_rate as usize;
@@ -987,5 +991,5 @@ opencdi::impl_state!(CdiBus {
     sys_ram, dvc, cdic, dma, mcd212, nvram, slave, shared_in4_owner, scc_timer, scc_uart_cmd, scc_uart_tx_irq,
     current_pc, wait_cycles, current_line_cycle, emulate_wait_states, current_frame,
 } skip {
-    rom, cdrom, uart_capture, trace_setup, watch_addr1, watch_addr2, watch_enabled, trace_fmv,
+    rom, cdrom, uart_capture, dvc_audio_capture, trace_setup, watch_addr1, watch_addr2, watch_enabled, trace_fmv,
 });

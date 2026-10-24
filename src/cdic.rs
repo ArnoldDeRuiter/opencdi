@@ -57,6 +57,10 @@ pub const CRC_CCITT_TABLE: [u16; 256] = [
     0x6e17, 0x7e36, 0x4e55, 0x5e74, 0x2e93, 0x3eb2, 0x0ed1, 0x1ef0
 ];
 
+// CD-i 1x Red/Green Book read speed = 75 sectors/sec
+// At 15,500,000 cycles/sec (SCC68070 master clock): 15,500,000 / 75 = 206,667 cycles/sector
+pub const CYCLES_PER_SECTOR: u32 = 206_700;
+
 pub struct Cdic {
     pub ram: Box<[u8; CDIC_RAM_SIZE]>,
     pub audio: CdiAudio,
@@ -439,10 +443,6 @@ impl Cdic {
     }
 
     pub fn step_cycles(&mut self, cycles: u32, cdrom: &mut Option<CdRom>) {
-        // CD-i 1x Red/Green Book read speed = 75 sectors/sec
-        // At 15,500,000 cycles/sec (SCC68070 master clock): 15,500,000 / 75 = 206,667 cycles/sector
-        const CYCLES_PER_SECTOR: u32 = 206_700;
-
         // 1. Audio tick (75 Hz) for audio maps
         self.audio_cycle_accumulator += cycles;
         while self.audio_cycle_accumulator >= CYCLES_PER_SECTOR {

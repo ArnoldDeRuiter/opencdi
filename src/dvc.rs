@@ -68,6 +68,8 @@ pub struct Mp2Decoder {
     pub synchronized: bool,
     pub conceal_discontinuity_frame: bool,
     pub concealed_frames: u64,
+    /// Bytes of the last frame decoded, replayed on load to rebuild the filterbank.
+    pub last_frame: Vec<u8>,
 }
 
 impl Default for Mp2Decoder {
@@ -81,6 +83,7 @@ impl Default for Mp2Decoder {
             synchronized: false,
             conceal_discontinuity_frame: false,
             concealed_frames: 0,
+            last_frame: Vec::new(),
         }
     }
 }
@@ -94,6 +97,7 @@ impl Mp2Decoder {
         self.synchronized = false;
         self.conceal_discontinuity_frame = false;
         self.concealed_frames = 0;
+        self.last_frame.clear();
     }
 
     pub fn decode_available(&mut self, input: &mut VecDeque<u8>) -> u64 {
@@ -138,6 +142,8 @@ impl Mp2Decoder {
                         self.conceal_discontinuity_frame = false;
                     }
                     Self::append_native(&mut self.pcm, &frame.pcm);
+                    self.last_frame.clear();
+                    self.last_frame.extend_from_slice(&contiguous[..frame_size]);
                     input.drain(..frame_size);
                     decoded += 1;
                     self.synchronized = true;
@@ -145,6 +151,7 @@ impl Mp2Decoder {
                 Err(_) => {
                     input.pop_front();
                     self.state.reset();
+                    self.last_frame.clear();
                     self.errors += 1;
                     self.synchronized = false;
                 }
@@ -1357,17 +1364,18 @@ opencdi::impl_state!(MpegSystemDemux {
     selected_audio_stream, selected_video_stream, program_ends,
 } skip {});
 
-// The oxideav synthesis filterbank is private to that crate: it is not saved and restarts from zero on load.
+// The oxideav filterbank is private to that crate; its V buffer holds only the last frame's subband samples, so replaying that frame on load rebuilds it.
 impl opencdi::savestate::State for Mp2Decoder {
     fn save(&self, w: &mut Vec<u8>) {
-        let Self { state: _, pcm, last_sample_rate, errors, resync_bytes, synchronized, conceal_discontinuity_frame, concealed_frames } = self;
+        let Self { state: _, pcm, last_sample_rate, errors, resync_bytes, synchronized, conceal_discontinuity_frame, concealed_frames, last_frame } = self;
         pcm.save(w);
         (*last_sample_rate, *errors, *resync_bytes).save(w);
         (*synchronized, *conceal_discontinuity_frame, *concealed_frames).save(w);
+        last_frame.save(w);
     }
 
     fn load(&mut self, r: &mut opencdi::savestate::Reader) -> Result<(), opencdi::savestate::StateError> {
-        let Self { state, pcm, last_sample_rate, errors, resync_bytes, synchronized, conceal_discontinuity_frame, concealed_frames } = self;
+        let Self { state, pcm, last_sample_rate, errors, resync_bytes, synchronized, conceal_discontinuity_frame, concealed_frames, last_frame } = self;
         pcm.load(r)?;
         last_sample_rate.load(r)?;
         errors.load(r)?;
@@ -1375,7 +1383,11 @@ impl opencdi::savestate::State for Mp2Decoder {
         synchronized.load(r)?;
         conceal_discontinuity_frame.load(r)?;
         concealed_frames.load(r)?;
+        last_frame.load(r)?;
         state.reset();
+        if !last_frame.is_empty() {
+            let _ = oxideav_mp2::frame::decode_frame_with(last_frame, state);
+        }
         Ok(())
     }
 }

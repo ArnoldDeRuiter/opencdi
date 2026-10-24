@@ -169,7 +169,13 @@ impl KeyBindings {
         bindings
     }
 
+    // User choice: apply and write the ini
     pub fn set_profile(&mut self, profile: InputProfile) {
+        self.apply_profile(profile);
+        self.save_to_ini();
+    }
+
+    fn apply_profile(&mut self, profile: InputProfile) {
         self.profile = profile;
         match profile {
             InputProfile::Standard => {
@@ -200,7 +206,6 @@ impl KeyBindings {
                 // Keep custom key configuration intact
             }
         }
-        self.save_to_ini();
     }
 
     pub fn save_to_ini(&self) {
@@ -244,13 +249,13 @@ impl KeyBindings {
                 if parts.len() == 2 {
                     match parts[0].to_lowercase().as_str() {
                         "profile" => match parts[1].to_lowercase().as_str() {
-                            "wasd" => self.set_profile(InputProfile::Wasd),
-                            "numpad" => self.set_profile(InputProfile::Numpad),
+                            "wasd" => self.apply_profile(InputProfile::Wasd),
+                            "numpad" => self.apply_profile(InputProfile::Numpad),
                             "custom" => {
                                 self.profile = InputProfile::Custom;
                                 detected_custom = true;
                             }
-                            _ => self.set_profile(InputProfile::Standard),
+                            _ => self.apply_profile(InputProfile::Standard),
                         },
                         "up" => if let Some(k) = string_to_key(parts[1]) { self.up = k; detected_custom = true; }
                         "down" => if let Some(k) = string_to_key(parts[1]) { self.down = k; detected_custom = true; }

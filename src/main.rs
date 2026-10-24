@@ -475,6 +475,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         surface: None,
         image_rect: (0, 0, SCREEN_WIDTH, SCREEN_HEIGHT),
         windowed: None,
+        restore_check: None,
         _host_audio: host_audio,
         gilrs,
         keys: HashSet::new(),
@@ -593,6 +594,7 @@ struct App {
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     image_rect: (usize, usize, usize, usize),
     windowed: Option<(Option<PhysicalPosition<i32>>, PhysicalSize<u32>)>,
+    restore_check: Option<Instant>,
     _host_audio: Option<HostAudioOutput>,
     gilrs: Option<gilrs::Gilrs>,
     keys: HashSet<Key>,
@@ -665,13 +667,24 @@ impl App {
                 self.windowed = Some((window.outer_position().ok(), window.inner_size())).filter(|_| !window.is_maximized());
             }
             window.set_fullscreen(if full { Some(Fullscreen::Borderless(None)) } else { None });
-            if let Some((pos, size)) = self.windowed.take().filter(|_| !full) {
-                if let Some(pos) = pos {
-                    window.set_outer_position(pos);
-                }
-                let _ = window.request_inner_size(size);
+            self.restore_check = None;
+            if !full && self.windowed.is_some() {
+                self.restore_windowed();
+                // Window managers may apply their own geometry after the switch (seen under WINE): check once more
+                self.restore_check = Some(Instant::now() + Duration::from_millis(300));
             }
             info!("Schermo intero: {}", if full { "SCHERMO INTERO" } else { "FINESTRA" });
+        }
+    }
+
+    // Puts the window back to the size and position it had before fullscreen
+    fn restore_windowed(&self) {
+        let (Some(window), Some((pos, size))) = (&self.window, self.windowed) else { return };
+        if let Some(pos) = pos.filter(|&p| window.outer_position().ok() != Some(p)) {
+            window.set_outer_position(pos);
+        }
+        if window.inner_size() != size {
+            let _ = window.request_inner_size(size);
         }
     }
 
@@ -1299,6 +1312,11 @@ impl App {
     fn tick(&mut self) -> bool {
         if !self.handle_actions() {
             return false;
+        }
+        if self.restore_check.is_some_and(|t| Instant::now() >= t) {
+            self.restore_windowed();
+            self.restore_check = None;
+            self.windowed = None;
         }
         if self.paused {
             // Keep the title live (disc, slot, wait states) at about two updates a second

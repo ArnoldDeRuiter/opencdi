@@ -438,6 +438,7 @@ pub struct Dvc {
     pub underflow_count: u32,
     pub fma_underflow_count: u32,
     pub has_valid_frame: bool,
+    pub window_visible: bool,
 }
 
 impl Dvc {
@@ -507,6 +508,7 @@ impl Dvc {
             underflow_count: 0,
             fma_underflow_count: 0,
             has_valid_frame: false,
+            window_visible: false,
         };
         d.reset_regs();
         d
@@ -560,6 +562,7 @@ impl Dvc {
         self.decoder_timecode = 0;
         self.display_frame_counter = 0;
         self.decoder_frame_counter = 0;
+        self.window_visible = false;
     }
 
     pub fn reset_regs(&mut self) {
@@ -933,6 +936,7 @@ impl Dvc {
                     self.or_fmv_word(FMV_ISR, FMV_IRQ_PAI);
                 }
                 if value & 0x0080 != 0 { // STOP
+                    self.window_visible = false;
                     self.video_armed = false;
                     self.video_playing = false;
                     self.decoder_enabled = false;
@@ -954,6 +958,7 @@ impl Dvc {
                     self.set_fmv_word(0x5C, 0x0000);
                 }
                 if value & 0x0100 != 0 { // RESET
+                    self.window_visible = false;
                     self.video_playing = false;
                     self.video_armed = false;
                     self.reset_stream();
@@ -963,6 +968,7 @@ impl Dvc {
                     self.decoder_enabled = true;
                 }
                 if value & 0x2000 != 0 { // DEC_OFF
+                    self.window_visible = false;
                     self.decoder_enabled = false;
                     self.video_playing = false;
                     self.underflow_count = 0;
@@ -977,6 +983,11 @@ impl Dvc {
                 }
             }
             FMV_VIDCMD => {
+                if value & 0x0100 != 0 {
+                    self.window_visible = false;
+                } else if value & 0x0020 != 0 {
+                    self.window_visible = true;
+                }
                 if value & 0x0004 != 0 || value & 0x0008 != 0 {
                     self.or_fmv_word(FMV_ISR, FMV_IRQ_VCUP | FMV_IRQ_DCL);
                 }
@@ -1332,7 +1343,7 @@ impl Dvc {
 
     pub fn get_scanline(&self, active_line: usize, out: &mut [u32; 768]) {
         out.fill(0xFF00_0000);
-        if !self.has_valid_frame {
+        if !self.has_valid_frame || !self.window_visible {
             return;
         }
 

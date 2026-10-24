@@ -1579,8 +1579,9 @@ fn process_macroblock(
         + (mb_col * block_size) as i64
         + hp as i64;
     let di0 = ((mb_row * dw + mb_col) * block_size) as i64;
-    let max_address = (dw * (mb_height * block_size - block_size + 1) - block_size) as i64;
-    if si0 < 0 || si0 > max_address || di0 < 0 || di0 > max_address {
+    let needed_si_max = si0 + ((block_size - 1 + if odd_v { 1 } else { 0 }) * dw + block_size - 1 + if odd_h { 1 } else { 0 }) as i64;
+    let needed_di_max = di0 + ((block_size - 1) * dw + block_size) as i64;
+    if si0 < 0 || needed_si_max >= s.len() as i64 || di0 < 0 || needed_di_max > d.len() as i64 {
         return; // corrupt video
     }
 

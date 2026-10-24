@@ -11,6 +11,9 @@ pub const ID_FILE_RESET: usize = 1002;
 pub const ID_FILE_EJECT: usize = 1004;
 pub const ID_FILE_EXIT: usize = 1003;
 
+pub const ID_PHYSICAL_DRIVE_BOOT_BASE: usize = 1100;
+pub const ID_PHYSICAL_DRIVE_SWAP_BASE: usize = 1130;
+
 pub const ID_PROFILE_STANDARD: usize = 1010;
 pub const ID_PROFILE_WASD: usize = 1011;
 pub const ID_PROFILE_NUMPAD: usize = 1012;
@@ -101,8 +104,33 @@ unsafe extern "system" {
     fn GetOpenFileNameW(lpofn: *mut OPENFILENAMEW) -> i32;
 }
 
-fn to_wide(s: &str) -> Vec<u16> {
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetLogicalDrives() -> u32;
+    fn GetDriveTypeW(lpRootPathName: *const u16) -> u32;
+}
+
+pub fn to_wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+}
+
+pub fn get_optical_drives() -> Vec<char> {
+    let mut drives = Vec::new();
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let mask = GetLogicalDrives();
+        for i in 0..26 {
+            if (mask & (1 << i)) != 0 {
+                let letter = (b'A' + i as u8) as char;
+                let root = format!("{}:\\", letter);
+                let wide_root = to_wide(&root);
+                if GetDriveTypeW(wide_root.as_ptr()) == 5 { // 5 = DRIVE_CDROM
+                    drives.push(letter);
+                }
+            }
+        }
+    }
+    drives
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -509,6 +537,16 @@ unsafe extern "system" fn custom_wndproc(
 ) -> isize {
     if msg == WM_COMMAND {
         let menu_id = (wparam & 0xFFFF) as usize;
+        if menu_id >= ID_PHYSICAL_DRIVE_BOOT_BASE && menu_id < ID_PHYSICAL_DRIVE_BOOT_BASE + 26 {
+            let letter = (b'A' + (menu_id - ID_PHYSICAL_DRIVE_BOOT_BASE) as u8) as char;
+            push_action(GuiAction::OpenDisc(PathBuf::from(format!("{}:", letter))));
+            return 0;
+        }
+        if menu_id >= ID_PHYSICAL_DRIVE_SWAP_BASE && menu_id < ID_PHYSICAL_DRIVE_SWAP_BASE + 26 {
+            let letter = (b'A' + (menu_id - ID_PHYSICAL_DRIVE_SWAP_BASE) as u8) as char;
+            push_action(GuiAction::InsertDisc(PathBuf::from(format!("{}:", letter))));
+            return 0;
+        }
         match menu_id {
             ID_FILE_INSERT => {
                 if let Some(path) = open_file_dialog(hwnd) {
@@ -653,9 +691,42 @@ pub fn attach_gui_menu(
 
         // 1. File Menu
         let file_menu = CreatePopupMenu();
-        AppendMenuW(file_menu, MF_STRING, ID_FILE_INSERT, to_wide("Insert Disc (Hot-swap)...\tCtrl+I").as_ptr());
-        AppendMenuW(file_menu, MF_STRING, ID_FILE_OPEN, to_wide("Open Disc & Restart Console...\tCtrl+O").as_ptr());
+        AppendMenuW(file_menu, MF_STRING, ID_FILE_INSERT, to_wide("Insert Disc Image (Hot-swap)...\tCtrl+I").as_ptr());
+        AppendMenuW(file_menu, MF_STRING, ID_FILE_OPEN, to_wide("Open Disc Image & Restart Console...\tCtrl+O").as_ptr());
         AppendMenuW(file_menu, MF_STRING, ID_FILE_EJECT, to_wide("Eject Disc").as_ptr());
+
+        let optical_drives = get_optical_drives();
+        if !optical_drives.is_empty() {
+            AppendMenuW(file_menu, MF_SEPARATOR, 0, std::ptr::null());
+            let drives_submenu = CreatePopupMenu();
+            for &letter in &optical_drives {
+                let boot_id = ID_PHYSICAL_DRIVE_BOOT_BASE + (letter as usize - 'A' as usize);
+                let swap_id = ID_PHYSICAL_DRIVE_SWAP_BASE + (letter as usize - 'A' as usize);
+
+                let single_drive_menu = CreatePopupMenu();
+                AppendMenuW(
+                    single_drive_menu,
+                    MF_STRING,
+                    boot_id,
+                    to_wide(&format!("Boot Real Disc ({}:) & Restart", letter)).as_ptr(),
+                );
+                AppendMenuW(
+                    single_drive_menu,
+                    MF_STRING,
+                    swap_id,
+                    to_wide(&format!("Hot-swap Real Disc ({}:)", letter)).as_ptr(),
+                );
+
+                AppendMenuW(
+                    drives_submenu,
+                    MF_POPUP,
+                    single_drive_menu as usize,
+                    to_wide(&format!("Optical Drive ({}:)", letter)).as_ptr(),
+                );
+            }
+            AppendMenuW(file_menu, MF_POPUP, drives_submenu as usize, to_wide("Real Optical CD Drives").as_ptr());
+        }
+
         AppendMenuW(file_menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(file_menu, MF_STRING, ID_FILE_RESET, to_wide("Restart Console (Reset)\tF5").as_ptr());
         AppendMenuW(file_menu, MF_SEPARATOR, 0, std::ptr::null());

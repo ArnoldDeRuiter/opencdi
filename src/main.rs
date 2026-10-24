@@ -329,7 +329,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             find_file(&a).or_else(|| {
                 let p = PathBuf::from(&a);
-                if p.exists() { Some(p) } else { None }
+                if p.exists() || crate::cdrom::parse_drive_letter(&p).is_some() {
+                    Some(p)
+                } else {
+                    None
+                }
             })
         }
     });
@@ -337,10 +341,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(p) = initial_disc {
         match bus.load_cdrom(&p) {
             Ok(_) => {
-                current_game_name = p
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "CD-i Disc".to_string());
+                current_game_name = if let Some(drive_letter) = crate::cdrom::parse_drive_letter(&p) {
+                    format!("Real Optical CD Drive ({}:)", drive_letter)
+                } else {
+                    p.file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "CD-i Disc".to_string())
+                };
                 info!("Loaded game disc at startup: {}", current_game_name);
 
                 let name_upper = current_game_name.to_uppercase();
@@ -455,14 +462,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     info!("Hot-swapping disc into CD-i drive: {:?}", path);
                     match bus.change_disc(&path) {
                         Ok(_) => {
-                            current_game_name = path
-                                .file_stem()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "CD-i Disc".to_string());
+                            current_game_name = if let Some(drive_letter) = crate::cdrom::parse_drive_letter(&path) {
+                                format!("Real Optical CD Drive ({}:)", drive_letter)
+                            } else {
+                                path.file_stem()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "CD-i Disc".to_string())
+                            };
                             info!("New disc inserted successfully: {}", current_game_name);
                         }
                         Err(e) => {
                             error!("Failed to hot-swap disc {:?}: {:?}", path, e);
+                            #[cfg(target_os = "windows")]
+                            {
+                                let hwnd = window.get_window_handle();
+                                let err_str = format!("Errore nell'inserimento del disco:\n\n{}", e);
+                                let wide_err = crate::gui::to_wide(&err_str);
+                                let wide_title = crate::gui::to_wide("OpenCDi - Errore Lettura Disco");
+                                unsafe {
+                                    MessageBoxW(
+                                        hwnd,
+                                        wide_err.as_ptr(),
+                                        wide_title.as_ptr(),
+                                        0x0000_0000 | 0x0000_0030, // MB_OK | MB_ICONWARNING
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -470,10 +495,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     info!("Loading and booting new disc (Reset): {:?}", path);
                     match bus.load_cdrom(&path) {
                         Ok(_) => {
-                            current_game_name = path
-                                .file_stem()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "CD-i Disc".to_string());
+                            current_game_name = if let Some(drive_letter) = crate::cdrom::parse_drive_letter(&path) {
+                                format!("Real Optical CD Drive ({}:)", drive_letter)
+                            } else {
+                                path.file_stem()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "CD-i Disc".to_string())
+                            };
                             info!("Disc loaded successfully: {}", current_game_name);
 
                             if !dvc_disabled && !bus.dvc.is_fitted() {
@@ -516,6 +544,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Err(e) => {
                             error!("Failed to load disc {:?}: {:?}", path, e);
+                            #[cfg(target_os = "windows")]
+                            {
+                                let hwnd = window.get_window_handle();
+                                let err_str = format!("Errore nel caricamento del disco:\n\n{}", e);
+                                let wide_err = crate::gui::to_wide(&err_str);
+                                let wide_title = crate::gui::to_wide("OpenCDi - Errore Lettura Disco");
+                                unsafe {
+                                    MessageBoxW(
+                                        hwnd,
+                                        wide_err.as_ptr(),
+                                        wide_title.as_ptr(),
+                                        0x0000_0000 | 0x0000_0030, // MB_OK | MB_ICONWARNING
+                                    );
+                                }
+                            }
                         }
                     }
                 }

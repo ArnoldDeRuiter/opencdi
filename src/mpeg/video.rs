@@ -17,6 +17,7 @@ const START_SLICE_LAST: i32 = 0xAF;
 const START_PICTURE: i32 = 0x00;
 const START_EXTENSION: i32 = 0xB5;
 const START_USER_DATA: i32 = 0xB2;
+const START_GOP: i32 = 0xB8;
 
 fn is_slice_start_code(c: i32) -> bool {
     (START_SLICE_FIRST..=START_SLICE_LAST).contains(&c)
@@ -757,6 +758,9 @@ pub struct Video {
     /// Set when an MPEG-1 sequence_end_code (00 00 01 B7) has been received
     /// and not yet reported to the host.
     sequence_end_seen: bool,
+    pub sequence_header_seen: bool,
+    pub gop_header_seen: bool,
+    pub last_gop_timecode: Option<u32>,
 }
 
 impl Video {
@@ -802,6 +806,9 @@ impl Video {
             has_reference_frame: false,
             assume_no_b_frames: false,
             sequence_end_seen: false,
+            sequence_header_seen: false,
+            gop_header_seen: false,
+            last_gop_timecode: None,
         };
         s.sequence_end_seen = s.buffer.contains_start_code_from(0, 0xB7);
         s.start_code = s.buffer.find_start_code(START_SEQUENCE);
@@ -815,6 +822,18 @@ impl Video {
     /// received, so the host can raise the end-of-sequence notification.
     pub fn take_sequence_end(&mut self) -> bool {
         std::mem::replace(&mut self.sequence_end_seen, false)
+    }
+
+    pub fn take_gop_seen(&mut self) -> bool {
+        std::mem::replace(&mut self.gop_header_seen, false)
+    }
+
+    pub fn take_sequence_seen(&mut self) -> bool {
+        std::mem::replace(&mut self.sequence_header_seen, false)
+    }
+
+    pub fn take_gop_timecode(&mut self) -> Option<u32> {
+        self.last_gop_timecode.take()
     }
 
     pub fn is_buffer_empty(&self) -> bool {
@@ -879,7 +898,30 @@ impl Video {
         }
         loop {
             if self.start_code != START_PICTURE {
-                self.start_code = self.buffer.find_start_code(START_PICTURE);
+                while self.start_code != START_PICTURE {
+                    if self.start_code == -1 {
+                        self.start_code = self.buffer.next_start_code();
+                        if self.start_code == -1 {
+                            break;
+                        }
+                    }
+                    if self.start_code == START_PICTURE {
+                        break;
+                    }
+                    if self.start_code == START_GOP {
+                        if !self.buffer.has(27) {
+                            return None;
+                        }
+                        self.gop_header_seen = true;
+                        self.decode_gop_header();
+                    } else if self.start_code == START_SEQUENCE {
+                        self.sequence_header_seen = true;
+                        if !self.has_sequence_header {
+                            self.decode_sequence_header();
+                        }
+                    }
+                    self.start_code = -1;
+                }
                 if self.start_code == -1 {
                     // Flush the last reference frame at end of stream.
                     if self.has_reference_frame
@@ -924,6 +966,22 @@ self.has_reference_frame = false;
                 self.buffer.discard_read_bytes();
                 return Some(idx);
             }
+        }
+    }
+
+    fn decode_gop_header(&mut self) {
+        if self.buffer.has(27) {
+            let _drop_frame = self.buffer.read(1);
+            let hours = self.buffer.read(5);
+            let minutes = self.buffer.read(6);
+            let _marker = self.buffer.read(1);
+            let seconds = self.buffer.read(6);
+            let pictures = self.buffer.read(6);
+            let _closed_gop = self.buffer.read(1);
+            let _broken_link = self.buffer.read(1);
+            let sec_pic = ((seconds & 0x3F) << 6) | (pictures & 0x3F);
+            let hr_min = ((hours & 0x1F) << 6) | (minutes & 0x3F);
+            self.last_gop_timecode = Some((hr_min << 16) | sec_pic);
         }
     }
 
@@ -1005,12 +1063,12 @@ self.has_reference_frame = false;
             cr: Plane {
                 width: self.chroma_width,
                 height: self.chroma_height,
-                data: vec![0; chroma],
+                data: vec![128; chroma],
             },
             cb: Plane {
                 width: self.chroma_width,
                 height: self.chroma_height,
-                data: vec![0; chroma],
+                data: vec![128; chroma],
             },
         }
     }

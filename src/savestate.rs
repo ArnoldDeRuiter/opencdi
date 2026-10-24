@@ -466,6 +466,11 @@ mod tests {
         assert_eq!(n.load_state(&bad), Err(StateError::BadMagic));
         assert_eq!(n.load_state(&a[..a.len() - 1]), Err(StateError::TooShort));
         assert_eq!(n.load_state(&a[..10]), Err(StateError::TooShort));
+        n.bus.dvc.load_rom_bytes(&[0x5A; 1024]);
+        assert_eq!(n.load_state(&a), Err(StateError::DvcMismatch));
+        let mut c = Vec::new();
+        n.save_state(b"fe", &mut c);
+        assert_eq!(crate::machine::Machine::new().load_state(&c), Err(StateError::DvcMismatch));
         n.bus.rom[0] = 1;
         assert_eq!(n.load_state(&a), Err(StateError::BiosMismatch));
         assert_eq!(n.bus.sys_ram[5], 0xAB);

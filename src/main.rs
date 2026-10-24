@@ -41,6 +41,7 @@ unsafe extern "system" {
     fn AllocConsole() -> i32;
     fn GetStdHandle(id: u32) -> *mut std::ffi::c_void;
     fn SetStdHandle(id: u32, handle: *mut std::ffi::c_void) -> i32;
+    fn GetFileType(handle: *mut std::ffi::c_void) -> u32;
     fn CreateFileW(name: *const u16, access: u32, share: u32, security: *mut std::ffi::c_void, disposition: u32, flags: u32, template: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
 }
 
@@ -52,18 +53,25 @@ fn attach_console() {
     const STD_ERROR_HANDLE: u32 = -12i32 as u32;
     const INVALID_HANDLE_VALUE: *mut std::ffi::c_void = -1isize as *mut std::ffi::c_void;
     unsafe {
+        let usable = |h: *mut std::ffi::c_void| !h.is_null() && h != INVALID_HANDLE_VALUE && GetFileType(h) != 0;
+        let saved = [GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE)];
+        // Output already goes to a file, a pipe or (under WINE) the Unix terminal
+        if saved.iter().all(|&h| usable(h)) {
+            return;
+        }
         if AttachConsole(ATTACH_PARENT_PROCESS) == 0 && AllocConsole() == 0 {
             return;
         }
-        // Keep redirected handles; only empty ones are pointed at the console
+        // Redirected handles stay; the others are pointed at the console
         let conout: Vec<u16> = "CONOUT$".encode_utf16().chain(std::iter::once(0)).collect();
-        for id in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
-            let h = GetStdHandle(id);
-            if h.is_null() || h == INVALID_HANDLE_VALUE {
-                let con = CreateFileW(conout.as_ptr(), 0x8000_0000 | 0x4000_0000, 0x1 | 0x2, std::ptr::null_mut(), 3, 0, std::ptr::null_mut());
-                if con != INVALID_HANDLE_VALUE {
-                    SetStdHandle(id, con);
-                }
+        for (id, h) in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE].into_iter().zip(saved) {
+            if usable(h) {
+                SetStdHandle(id, h);
+                continue;
+            }
+            let con = CreateFileW(conout.as_ptr(), 0x8000_0000 | 0x4000_0000, 0x1 | 0x2, std::ptr::null_mut(), 3, 0, std::ptr::null_mut());
+            if con != INVALID_HANDLE_VALUE {
+                SetStdHandle(id, con);
             }
         }
     }

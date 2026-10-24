@@ -259,7 +259,8 @@ fn find_dvc(dir: &Path) -> Option<PathBuf> {
                 let r = &img.report;
                 let level = if r.status == bios::Status::Ok { RETRO_LOG_INFO } else { RETRO_LOG_WARN };
                 let inside = entry.map_or_else(String::new, |e| format!(" ({})", e));
-                log(level, &format!("DVC {}{} [{}]: {}", p.display(), inside, r.status, r.message));
+                let skip = if r.status == bios::Status::Warning { "; not fitted, only the known VMPEG dump is used" } else { "" };
+                log(level, &format!("DVC {}{} [{}]: {}{}", p.display(), inside, r.status, r.message, skip));
                 if r.status == bios::Status::Ok {
                     return Some(p);
                 }

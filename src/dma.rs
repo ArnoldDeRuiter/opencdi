@@ -85,3 +85,10 @@ impl SccDma {
         }
     }
 }
+
+crate::impl_state!(DmaChannel {
+    channel_status, channel_error, device_control, operation_control, sequence_control, channel_control,
+    transfer_counter, memory_address_counter, device_address_counter,
+} skip {});
+
+crate::impl_state!(SccDma { channels } skip {});

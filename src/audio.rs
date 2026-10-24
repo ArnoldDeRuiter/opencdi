@@ -474,3 +474,34 @@ impl HostAudioOutput {
         }
     }
 }
+
+crate::impl_state!(ChannelState { s0, s1 } skip {});
+
+// Host queues are not state (the frontend drains them every frame); volume and mute are host settings.
+impl crate::savestate::State for CdiAudio {
+    fn save(&self, w: &mut Vec<u8>) {
+        let Self { left_state, right_state, map_left_state, map_right_state, sample_queue: _, sfx_queue: _, source_rate, volume: _, muted: _, total_sectors_decoded } = self;
+        for s in [left_state, right_state, map_left_state, map_right_state] {
+            s.save(w);
+        }
+        source_rate.load(Ordering::Relaxed).save(w);
+        total_sectors_decoded.save(w);
+    }
+
+    fn load(&mut self, r: &mut crate::savestate::Reader) -> Result<(), crate::savestate::StateError> {
+        let Self { left_state, right_state, map_left_state, map_right_state, sample_queue, sfx_queue, source_rate, volume: _, muted: _, total_sectors_decoded } = self;
+        for s in [left_state, right_state, map_left_state, map_right_state] {
+            s.load(r)?;
+        }
+        let mut rate = 0u32;
+        rate.load(r)?;
+        source_rate.store(rate, Ordering::Relaxed);
+        total_sectors_decoded.load(r)?;
+        for q in [sample_queue, sfx_queue] {
+            if let Ok(mut q) = q.lock() {
+                q.clear();
+            }
+        }
+        Ok(())
+    }
+}

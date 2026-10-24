@@ -42,3 +42,5 @@ impl Timekeeper {
         self.ram[idx] = val;
     }
 }
+
+crate::impl_state!(Timekeeper { ram } skip {});

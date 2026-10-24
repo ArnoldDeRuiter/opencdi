@@ -325,6 +325,7 @@ impl CdiBus {
             self.current_frame, start, count, self.dvc.transfer_for_fma, b16);
 
         let for_fma = self.dvc.transfer_for_fma;
+        if crate::dvc::dvc_trace_on() { eprintln!("DVCT f={} DMA fma={} words={}", crate::dvc::TRACE_VS.load(std::sync::atomic::Ordering::Relaxed), for_fma, count); }
         for i in 0..count {
             let addr = start.wrapping_add(i * 2);
             let hi = self.read_byte(addr);
@@ -980,3 +981,12 @@ mod tests {
         assert!(bus.wait_cycles > 0 && bus.current_line_cycle > 100 && bus.trace_setup);
     }
 }
+
+crate::impl_state_enum!(SharedIn4Owner { Idle = 0, Cdic = 1, Vmpeg = 2 });
+
+crate::impl_state!(CdiBus {
+    sys_ram, cdic, dma, mcd212, nvram, slave, shared_in4_owner, scc_timer, scc_uart_cmd, scc_uart_tx_irq,
+    current_pc, wait_cycles, current_line_cycle, emulate_wait_states, current_frame,
+} skip {
+    rom, dvc, cdrom, uart_capture, trace_setup, watch_addr1, watch_addr2, watch_enabled, trace_fmv,
+});

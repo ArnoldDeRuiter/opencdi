@@ -153,6 +153,15 @@ impl Mp2Decoder {
         decoded
     }
 
+    // A trailing partial frame cannot be decoded, so it does not keep the decoder fed.
+    pub fn has_frame(input: &VecDeque<u8>) -> bool {
+        if input.len() < 4 {
+            return false;
+        }
+        let head = [input[0], input[1], input[2], input[3]];
+        oxideav_mp2::header::FrameHeader::parse(&head).map_or(false, |h| input.len() >= h.frame_size_bytes())
+    }
+
     fn append_native(output: &mut VecDeque<(f32, f32)>, channels: &[Vec<f64>]) {
         let Some(left) = channels.first() else { return; };
         let right = channels.get(1).unwrap_or(left);
@@ -437,6 +446,8 @@ pub struct Dvc {
     pub vsync_counter: usize,
     pub underflow_count: u32,
     pub fma_underflow_count: u32,
+    /// Audio samples decoded since the last FMA play or stop.
+    pub fma_decoded_since_play: u64,
     pub has_valid_frame: bool,
 }
 
@@ -506,6 +517,7 @@ impl Dvc {
             vsync_counter: 0,
             underflow_count: 0,
             fma_underflow_count: 0,
+            fma_decoded_since_play: 0,
             has_valid_frame: false,
         };
         d.reset_regs();
@@ -555,6 +567,7 @@ impl Dvc {
         self.vsync_counter = 0;
         self.underflow_count = 0;
         self.fma_underflow_count = 0;
+        self.fma_decoded_since_play = 0;
         self.frame_accum = 0.0;
         self.display_timecode = 0;
         self.decoder_timecode = 0;
@@ -874,10 +887,14 @@ impl Dvc {
                     self.fma_stream_fifo.clear();
                     self.fma_demux.clear();
                     self.mp2.reset();
+                    self.fma_decoded_since_play = 0;
                     self.set_fma_word(0x02, 0x0200);
                     self.set_fma_word(FMA_ISR, 0);
                 }
                 if value & 0x0002 != 0 { // PLAY ARM
+                    if !self.audio_enabled {
+                        self.fma_decoded_since_play = 0;
+                    }
                     self.audio_armed = true;
                     self.audio_enabled = true;
                     self.or_fma_word(0x02, 0x0010);
@@ -1013,6 +1030,7 @@ impl Dvc {
                 self.audio_sample_rate = self.mp2.last_sample_rate;
                 self.or_fma_word(0x02, 0x0004);
                 self.or_fma_word(FMA_ISR, 0x0004);
+                self.fma_decoded_since_play += self.mp2.pcm.len() as u64;
                 while let Some(sample) = self.mp2.pcm.pop_front() {
                     if self.audio_out.len() < 32 * 1024 {
                         self.audio_out.push_back(sample);
@@ -1029,6 +1047,7 @@ impl Dvc {
                 self.audio_sample_rate = self.mp2.last_sample_rate;
                 self.or_fma_word(0x02, 0x0004);
                 self.or_fma_word(FMA_ISR, 0x0004);
+                self.fma_decoded_since_play += self.mp2.pcm.len() as u64;
                 while let Some(sample) = self.mp2.pcm.pop_front() {
                     if self.audio_out.len() < 32 * 1024 {
                         self.audio_out.push_back(sample);
@@ -1107,9 +1126,12 @@ impl Dvc {
 
         // Check for FMA audio buffer drain / underflow when audio is active
         if self.audio_enabled || self.audio_armed {
-            let fma_drained = self.fma_stream_fifo.is_empty()
-                && self.fma_demux.audio.is_empty()
-                && self.demux.audio.is_empty();
+            // Concealment: report underflow only once playback has run (half a second decoded), not during pre-roll.
+            let fma_started = self.fma_decoded_since_play >= u64::from(self.audio_sample_rate / 2);
+            let fma_drained = fma_started
+                && self.fma_stream_fifo.is_empty()
+                && !Mp2Decoder::has_frame(&self.fma_demux.audio)
+                && !Mp2Decoder::has_frame(&self.demux.audio);
             if fma_drained {
                 self.fma_underflow_count = self.fma_underflow_count.saturating_add(1);
                 if self.fma_underflow_count == 10 {
@@ -1325,7 +1347,7 @@ opencdi::impl_state!(Dvc {
     dvc_stream_fifo, fma_stream_fifo, transfer_for_fma, fma_dma_seen, dma_requested, framebuffer,
     demux, fma_demux, mp2, audio_sample_rate, audio_out,
     video_decoder, video_width, video_height, frames_decoded_count, frames_presented_count, vsync_counter,
-    underflow_count, fma_underflow_count, has_valid_frame,
+    underflow_count, fma_underflow_count, fma_decoded_since_play, has_valid_frame,
 } skip {
     rom,
 });

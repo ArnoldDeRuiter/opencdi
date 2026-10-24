@@ -1198,8 +1198,10 @@ impl Dvc {
             let mut decoded_w = 0;
             let mut decoded_h = 0;
             let mut got_frame = false;
+            let mut sequence_start = false;
             if let Some(ref mut decoder) = self.video_decoder {
                 if let Some(frame_idx) = decoder.decode() {
+                    sequence_start = decoder.take_sequence_start();
                     self.frames_decoded_count += 1;
                     self.frames_presented_count += 1;
                     if self.frames_decoded_count % 30 == 1 {
@@ -1236,7 +1238,8 @@ impl Dvc {
 
                 // Set FMV ISR bits
                 self.or_fmv_word(FMV_ISR, FMV_IRQ_PIC);
-                if self.frames_presented_count == 1 {
+                // First picture of a play, and the first after each sequence header in the stream.
+                if self.frames_presented_count == 1 || sequence_start {
                     self.or_fmv_word(FMV_ISR, FMV_IRQ_SEQ | FMV_IRQ_GOP);
                 }
             } else if self.frames_decoded_count > 0 && (self.video_playing || self.video_armed) {

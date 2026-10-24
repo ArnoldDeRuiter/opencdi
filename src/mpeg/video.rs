@@ -758,6 +758,8 @@ pub struct Video {
     /// Set when an MPEG-1 sequence_end_code (00 00 01 B7) has been received
     /// and not yet reported to the host.
     sequence_end_seen: bool,
+    // Set on each parsed sequence header; the host takes it with the next picture.
+    sequence_start_seen: bool,
 }
 
 impl Video {
@@ -803,6 +805,7 @@ impl Video {
             has_reference_frame: false,
             assume_no_b_frames: false,
             sequence_end_seen: false,
+            sequence_start_seen: false,
         };
         s.sequence_end_seen = s.buffer.contains_start_code_from(0, 0xB7);
         s.start_code = s.buffer.find_start_code(START_SEQUENCE);
@@ -816,6 +819,11 @@ impl Video {
     /// received, so the host can raise the end-of-sequence notification.
     pub fn take_sequence_end(&mut self) -> bool {
         std::mem::replace(&mut self.sequence_end_seen, false)
+    }
+
+    /// Returns true once per sequence header parsed since the last call.
+    pub fn take_sequence_start(&mut self) -> bool {
+        std::mem::replace(&mut self.sequence_start_seen, false)
     }
 
     pub fn is_buffer_empty(&self) -> bool {
@@ -1004,6 +1012,7 @@ impl Video {
 
         // Header handled; a repeat of the same size keeps the reference pictures.
         self.start_code = -1;
+        self.sequence_start_seen = true;
         if self.has_sequence_header && self.frames.first().map_or(false, |f| f.width == self.width && f.height == self.height) {
             return true;
         }
@@ -1735,8 +1744,10 @@ mod edge_mc_tests {
         es.extend(std::iter::repeat(0).take(16));
         let mut v = Video::new(es);
         assert_eq!(v.width(), 32);
+        assert!(v.take_sequence_start() && !v.take_sequence_start());
         v.decode();
         assert_eq!((v.width(), v.frame(0).y.width), (48, 48));
+        assert!(v.take_sequence_start());
     }
 
     #[test]
@@ -1768,5 +1779,5 @@ opencdi::impl_state!(Video {
     start_code, picture_type, motion_forward, motion_backward, has_sequence_header,
     quantizer_scale, slice_begin, macroblock_address, mb_row, mb_col, macroblock_type, macroblock_intra,
     dc_predictor, frames, cur, fwd, bwd, block_data, intra_quant_matrix, non_intra_quant_matrix,
-    has_reference_frame, assume_no_b_frames, sequence_end_seen,
+    has_reference_frame, assume_no_b_frames, sequence_end_seen, sequence_start_seen,
 } skip {});

@@ -1281,6 +1281,10 @@ impl ApplicationHandler for App {
         {
             gui::attach_gui_menu(self.hwnd(), self.bindings.profile, self.input_device_mode, self.m.bus.mcd212.video_mode);
             gui::update_dvc_menu(self.m.bus.dvc.is_fitted());
+            // SetMenu takes the menu bar out of the client area; winit adds it back when sizing
+            if let Some(window) = &self.window {
+                let _ = window.request_inner_size(LogicalSize::new(SCREEN_WIDTH as f64, SCREEN_HEIGHT as f64));
+            }
         }
         let now = Instant::now();
         self.run_at = now;

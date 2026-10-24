@@ -1,4 +1,5 @@
 // OpenCDi Release Build - 2026-09-29 15:45
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 use std::path::{Path, PathBuf};
 use log::{info, error, warn};
 use std::collections::HashSet;
@@ -32,6 +33,55 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn MessageBoxW(hwnd: *mut std::ffi::c_void, lptext: *const u16, lpcaption: *const u16, utype: u32) -> i32;
 }
+
+#[cfg(target_os = "windows")]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn AttachConsole(process_id: u32) -> i32;
+    fn AllocConsole() -> i32;
+    fn GetStdHandle(id: u32) -> *mut std::ffi::c_void;
+    fn SetStdHandle(id: u32, handle: *mut std::ffi::c_void) -> i32;
+    fn CreateFileW(name: *const u16, access: u32, share: u32, security: *mut std::ffi::c_void, disposition: u32, flags: u32, template: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+}
+
+// --console: the parent's console (cmd, PowerShell) or a new one, so a GUI-subsystem release build can show its log
+#[cfg(target_os = "windows")]
+fn attach_console() {
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+    const INVALID_HANDLE_VALUE: *mut std::ffi::c_void = -1isize as *mut std::ffi::c_void;
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 && AllocConsole() == 0 {
+            return;
+        }
+        // Keep redirected handles; only empty ones are pointed at the console
+        let conout: Vec<u16> = "CONOUT$".encode_utf16().chain(std::iter::once(0)).collect();
+        for id in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let h = GetStdHandle(id);
+            if h.is_null() || h == INVALID_HANDLE_VALUE {
+                let con = CreateFileW(conout.as_ptr(), 0x8000_0000 | 0x4000_0000, 0x1 | 0x2, std::ptr::null_mut(), 3, 0, std::ptr::null_mut());
+                if con != INVALID_HANDLE_VALUE {
+                    SetStdHandle(id, con);
+                }
+            }
+        }
+    }
+}
+
+const USAGE: &str = "\
+Usage: opencdi [options] [disc image (cue, chd, iso, bin)]
+
+  --rom <path>        System BIOS (default: search bios/, the current and the program directory)
+  --frames <n>        Quit after n emulated frames
+  --mouse             Start in mouse mode (host mouse drives the CD-i pointer)
+  --no-host-input     Ignore host keyboard, mouse and gamepads; never grab the cursor
+  --bios, --standalone  Boot the BIOS shell without a disc
+  --no-dvc, --nodvc   Boot without the Digital Video Cartridge
+  --slave-debug       Log slave (mouse channel) bytes
+  --console           Windows: show the log in the parent console or a new console window
+  --help, -h          Show this text
+";
 
 fn find_file(relative_subpath: &str) -> Option<PathBuf> {
     let sub = Path::new(relative_subpath);
@@ -235,6 +285,17 @@ fn save_screenshot_ppm(frame_count: u64, framebuffer: &[u32]) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let has_flag = |f: &str| args.iter().any(|a| a == f);
+    let help = has_flag("--help") || has_flag("-h");
+    #[cfg(target_os = "windows")]
+    if help || has_flag("--console") {
+        attach_console();
+    }
+    if help {
+        print!("{}", USAGE);
+        return Ok(());
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     #[cfg(target_os = "windows")]
@@ -244,8 +305,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("=== OpenCDi - Philips CD-i Emulator ===");
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let has_flag = |f: &str| args.iter().any(|a| a == f);
     let flag_value = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).cloned();
     let rom_arg = flag_value("--rom").map(PathBuf::from);
     let max_frames: Option<u64> = flag_value("--frames").and_then(|s| s.parse().ok());

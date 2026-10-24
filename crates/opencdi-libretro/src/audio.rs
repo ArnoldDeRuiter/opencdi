@@ -29,17 +29,19 @@ pub struct Channel {
     primed: bool,
     pub restarts: u64,
     pub dropped: u64,
+    pub frames_in: u64,
 }
 
 impl Channel {
     const fn new() -> Self {
-        Channel { fifo: VecDeque::new(), primed: false, restarts: 0, dropped: 0 }
+        Channel { fifo: VecDeque::new(), primed: false, restarts: 0, dropped: 0, frames_in: 0 }
     }
 
     pub fn push(&mut self, src: &[Frame]) {
         if src.is_empty() {
             return;
         }
+        self.frames_in += src.len() as u64;
         if !self.primed {
             self.fifo.resize(self.fifo.len() + PREFILL, (0.0, 0.0));
             self.primed = true;
@@ -71,7 +73,7 @@ impl Channel {
     }
 }
 
-opencdi::impl_state!(Channel { fifo, primed } skip { restarts, dropped });
+opencdi::impl_state!(Channel { fifo, primed } skip { restarts, dropped, frames_in });
 
 fn gcd(mut a: u32, mut b: u32) -> u32 {
     while b != 0 {

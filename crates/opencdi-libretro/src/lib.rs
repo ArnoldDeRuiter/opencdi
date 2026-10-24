@@ -708,8 +708,8 @@ fn unload() {
     if core.machine.is_some() {
         let p = &core.pacer;
         log(RETRO_LOG_INFO, &format!(
-            "audio: {} frames sent; prefill restarts main={} sfx={} mpeg={}; dropped main={} sfx={} mpeg={}",
-            p.frames_out, p.main.restarts, p.sfx.restarts, p.mpeg.restarts, p.main.dropped, p.sfx.dropped, p.mpeg.dropped
+            "audio: {} frames sent; received main={} sfx={} mpeg={}; prefill restarts main={} sfx={} mpeg={}; dropped main={} sfx={} mpeg={}",
+            p.frames_out, p.main.frames_in, p.sfx.frames_in, p.mpeg.frames_in, p.main.restarts, p.sfx.restarts, p.mpeg.restarts, p.main.dropped, p.sfx.dropped, p.mpeg.dropped
         ));
     }
     core.machine = None;

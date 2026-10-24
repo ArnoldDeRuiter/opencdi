@@ -1,6 +1,7 @@
 use crate::bios::{self, BiosImage};
 use crate::bus::CdiBus;
 use crate::mcd212::VideoMode;
+use crate::os9_trace::Os9Trace;
 use crate::savestate::{self, Identity, Reader, State, StateError};
 use m68k::{CpuCore, CpuType};
 use std::path::Path;
@@ -10,11 +11,12 @@ pub struct Machine {
     pub bus: CdiBus,
     pub cpu: CpuCore,
     pub instructions: u64,
+    pub os9_trace: Option<Box<Os9Trace>>,
 }
 
 impl Machine {
     pub fn new() -> Self {
-        Self { bus: CdiBus::new(), cpu: CpuCore::new(), instructions: 0 }
+        Self { bus: CdiBus::new(), cpu: CpuCore::new(), instructions: 0, os9_trace: Os9Trace::from_env() }
     }
 
     /// Reads and checks a system ROM file or MAME-style zip; the name is the zip entry used, if any.
@@ -84,6 +86,10 @@ impl Machine {
     pub fn run_frame(&mut self) {
         let bus = &mut self.bus;
         let cpu = &mut self.cpu;
+        let mut trace = self.os9_trace.as_deref_mut();
+        if let Some(t) = trace.as_deref_mut() {
+            t.next_frame();
+        }
         bus.slave.video_mode = bus.mcd212.video_mode;
         let total_lines = bus.mcd212.video_mode.total_scanlines();
         let cyc_per_line = bus.mcd212.video_mode.cycles_per_scanline();
@@ -105,12 +111,21 @@ impl Machine {
                 bus.current_pc = cpu.pc;
                 bus.current_line_cycle = line_cycles.max(0) as u32;
 
-                let batch = cpu.run_for_cycles(bus, budget);
+                let batch = match trace.as_deref_mut() {
+                    Some(t) if t.has_pending() => cpu.run_for_cycles_with_hook(bus, budget, |c, _, _| {
+                        t.check_return(c);
+                        m68k::CycleBatchControl::Continue
+                    }),
+                    _ => cpu.run_for_cycles(bus, budget),
+                };
                 self.instructions += batch.instructions as u64;
                 let mut batch_cycles = batch.cycles + bus.consume_wait_cycles();
 
                 match batch.exit {
                     m68k::CycleBatchExit::TrapInstruction { trap_num } => {
+                        if let Some(t) = trace.as_deref_mut() {
+                            t.on_trap(cpu, bus, trap_num);
+                        }
                         batch_cycles += cpu.take_trap_exception(bus, trap_num);
                     }
                     m68k::CycleBatchExit::AlineTrap { .. } => {
@@ -213,7 +228,7 @@ impl Machine {
     }
 }
 
-crate::impl_state!(Machine { cpu, bus, instructions } skip {});
+crate::impl_state!(Machine { cpu, bus, instructions } skip { os9_trace });
 
 impl Default for Machine {
     fn default() -> Self {

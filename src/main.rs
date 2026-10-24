@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode as Key, ModifiersState, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
@@ -421,6 +421,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mods: ModifiersState::empty(),
         focused: false,
         cursor: None,
+        rel_pointer: None,
         mouse_left: false,
         mouse_right: false,
         mouse_middle: false,
@@ -487,6 +488,17 @@ fn image_rect(dst_w: usize, dst_h: usize) -> (usize, usize, usize, usize) {
     }
 }
 
+// Host cursor position mapped through the letterbox onto the CD-i picture, clamped
+fn cursor_to_cdi(pos: PhysicalPosition<f64>, rect: (usize, usize, usize, usize)) -> (i32, i32) {
+    let (x0, y0, w, h) = rect;
+    if w == 0 || h == 0 {
+        return (0, 0);
+    }
+    let mx = (pos.x - x0 as f64) * SCREEN_WIDTH as f64 / w as f64;
+    let my = (pos.y - y0 as f64) * SCREEN_HEIGHT as f64 / h as f64;
+    ((mx.round() as i32).clamp(0, SCREEN_WIDTH as i32 - 1), (my.round() as i32).clamp(0, SCREEN_HEIGHT as i32 - 1))
+}
+
 // Nearest-neighbour stretch with black bars, same 10-bit fixed-point stepping as minifb's scaler
 fn blit_aspect(dst: &mut [u32], dst_w: usize, dst_h: usize, src: &[u32], rect: (usize, usize, usize, usize)) {
     dst.fill(0);
@@ -525,6 +537,7 @@ struct App {
     mods: ModifiersState,
     focused: bool,
     cursor: Option<PhysicalPosition<f64>>,
+    rel_pointer: Option<(f64, f64)>,
     mouse_left: bool,
     mouse_right: bool,
     mouse_middle: bool,
@@ -615,6 +628,14 @@ impl App {
             return;
         }
         self.grab_applied = Some(want);
+        // While grabbed the host cursor is hidden and pinned (Windows: window centre), so mouse mode follows raw motion
+        self.rel_pointer = want.then(|| match self.cursor {
+            Some(pos) => {
+                let (x, y) = cursor_to_cdi(pos, self.image_rect);
+                (x as f64, y as f64)
+            }
+            None => (self.pad_x as f64, self.pad_y as f64),
+        });
         window.set_cursor_visible(!want);
         let mode = if want { CursorGrabMode::Confined } else { CursorGrabMode::None };
         if let Err(e) = window.set_cursor_grab(mode) {
@@ -1057,17 +1078,14 @@ impl App {
         let mut mouse_y = self.pad_y;
 
         if is_active && self.mouse_captured {
-            if let Some(pos) = self.cursor {
+            if let Some((x, y)) = self.rel_pointer {
+                (mouse_x, mouse_y) = (x.round() as i32, y.round() as i32);
+            } else if let Some(pos) = self.cursor {
+                (mouse_x, mouse_y) = cursor_to_cdi(pos, self.image_rect);
+            }
+            if self.rel_pointer.is_some() || self.cursor.is_some() {
                 if self.mouse_left { mouse_btn |= 1; }
                 if self.mouse_right { mouse_btn |= 2; }
-
-                let (x0, y0, w, h) = self.image_rect;
-                if w > 0 && h > 0 {
-                    let mx = (pos.x - x0 as f64) * SCREEN_WIDTH as f64 / w as f64;
-                    let my = (pos.y - y0 as f64) * SCREEN_HEIGHT as f64 / h as f64;
-                    mouse_x = (mx.round() as i32).clamp(0, 767);
-                    mouse_y = (my.round() as i32).clamp(0, 559);
-                }
             }
         }
 
@@ -1078,6 +1096,9 @@ impl App {
             self.pad_x_f = self.pad_x as f32;
             self.pad_y_f = self.pad_y as f32;
             m.bus.slave.device_mouse_updated = false;
+            if self.rel_pointer.is_some() {
+                self.rel_pointer = Some((self.pad_x as f64, self.pad_y as f64));
+            }
         }
 
         if !self.disc_launched && m.bus.cdrom.is_some() {
@@ -1390,6 +1411,18 @@ impl ApplicationHandler for App {
         }
     }
 
+    fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
+        // Relative motion in host pixels, scaled like the letterboxed picture
+        if let (DeviceEvent::MouseMotion { delta: (dx, dy) }, Some((x, y))) = (event, self.rel_pointer) {
+            let (_, _, w, h) = self.image_rect;
+            if w > 0 && h > 0 {
+                let x = (x + dx * SCREEN_WIDTH as f64 / w as f64).clamp(0.0, (SCREEN_WIDTH - 1) as f64);
+                let y = (y + dy * SCREEN_HEIGHT as f64 / h as f64).clamp(0.0, (SCREEN_HEIGHT - 1) as f64);
+                self.rel_pointer = Some((x, y));
+            }
+        }
+    }
+
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         if self.window.is_none() || el.exiting() {
             return;
@@ -1450,6 +1483,9 @@ mod tests {
         let mut big = vec![1u32; 1536 * 1120];
         blit_aspect(&mut big, 1536, 1120, &src, image_rect(1536, 1120));
         assert_eq!(big[1536 * 3 + 5], src[SCREEN_WIDTH + 2]);
+        assert_eq!(cursor_to_cdi(PhysicalPosition::new(100.0, 200.0), image_rect(768, 560)), (100, 200));
+        assert_eq!(cursor_to_cdi(PhysicalPosition::new(219.0 + 1481.0, 1080.0), image_rect(1920, 1080)), (767, 559));
+        assert_eq!(cursor_to_cdi(PhysicalPosition::new(0.0, 0.0), image_rect(1920, 1080)), (0, 0));
     }
 
     #[test]

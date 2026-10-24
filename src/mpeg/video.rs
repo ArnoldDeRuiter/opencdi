@@ -17,6 +17,7 @@ const START_SLICE_LAST: i32 = 0xAF;
 const START_PICTURE: i32 = 0x00;
 const START_EXTENSION: i32 = 0xB5;
 const START_USER_DATA: i32 = 0xB2;
+const SEQUENCE_HEADER_MAX_BITS: usize = 64 + 2 * 64 * 8;
 
 fn is_slice_start_code(c: i32) -> bool {
     (START_SLICE_FIRST..=START_SLICE_LAST).contains(&c)
@@ -878,22 +879,36 @@ impl Video {
             return None;
         }
         loop {
-            if self.start_code != START_PICTURE {
-                self.start_code = self.buffer.find_start_code(START_PICTURE);
-                if self.start_code == -1 {
-                    // Flush the last reference frame at end of stream.
-                    if self.has_reference_frame
-                        && !self.assume_no_b_frames
-                        && (self.buffer.has_ended() || self.sequence_end_seen)
-                        && (self.picture_type == PICTURE_TYPE_INTRA
-                            || self.picture_type == PICTURE_TYPE_PREDICTIVE)
-                    {
-
-self.has_reference_frame = false;
-                        return Some(self.bwd);
+            while self.start_code != START_PICTURE && self.start_code != -1 {
+                if self.start_code == START_SEQUENCE {
+                    if !self.buffer.has(SEQUENCE_HEADER_MAX_BITS) {
+                        return None;
                     }
-                    return None;
+                    if self.sequence_size_changes() && self.has_reference_frame && !self.assume_no_b_frames {
+                        // Show the held reference picture before the new size drops it.
+                        self.has_reference_frame = false;
+                        return Some(self.emit(self.bwd));
+                    }
+                    self.decode_sequence_header();
                 }
+                self.start_code = self.buffer.next_start_code();
+            }
+            if self.start_code == -1 {
+                self.start_code = self.buffer.next_start_code();
+                if self.start_code != -1 {
+                    continue;
+                }
+                // Flush the last reference frame at end of stream.
+                if self.has_reference_frame
+                    && !self.assume_no_b_frames
+                    && (self.buffer.has_ended() || self.sequence_end_seen)
+                    && (self.picture_type == PICTURE_TYPE_INTRA
+                        || self.picture_type == PICTURE_TYPE_PREDICTIVE)
+                {
+                    self.has_reference_frame = false;
+                    return Some(self.bwd);
+                }
+                return None;
             }
 
             // Need a full picture buffered before decoding it.
@@ -918,26 +933,39 @@ self.has_reference_frame = false;
             };
 
             if let Some(idx) = frame {
-                self.last_frame_time = self.time;
-                self.frames_decoded += 1;
-                self.time = self.frames_decoded as f64 / self.framerate;
-                self.buffer.discard_read_bytes();
-                return Some(idx);
+                return Some(self.emit(idx));
             }
         }
     }
 
+    fn emit(&mut self, idx: usize) -> usize {
+        self.last_frame_time = self.time;
+        self.frames_decoded += 1;
+        self.time = self.frames_decoded as f64 / self.framerate;
+        self.buffer.discard_read_bytes();
+        idx
+    }
+
+    // Peeks the size fields of a sequence header at the read position.
+    fn sequence_size_changes(&mut self) -> bool {
+        let pos = self.buffer.tell();
+        let (w, h) = (self.buffer.read(12) as usize, self.buffer.read(12) as usize);
+        self.buffer.seek(pos);
+        w != 0 && h != 0 && (w != self.width || h != self.height)
+    }
+
     fn decode_sequence_header(&mut self) -> bool {
-        let max_header_size = 64 + 2 * 64 * 8;
-        if !self.buffer.has(max_header_size) {
+        if !self.buffer.has(SEQUENCE_HEADER_MAX_BITS) {
             return false;
         }
 
-        self.width = self.buffer.read(12) as usize;
-        self.height = self.buffer.read(12) as usize;
-        if self.width == 0 || self.height == 0 {
+        let width = self.buffer.read(12) as usize;
+        let height = self.buffer.read(12) as usize;
+        if width == 0 || height == 0 {
             return false;
         }
+        self.width = width;
+        self.height = height;
 
         let mut par_code = self.buffer.read(4) as i32 - 1;
         if par_code < 0 {
@@ -974,6 +1002,12 @@ self.has_reference_frame = false;
             self.non_intra_quant_matrix = NON_INTRA_QUANT_MATRIX;
         }
 
+        // Header handled; a repeat of the same size keeps the reference pictures.
+        self.start_code = -1;
+        if self.has_sequence_header && self.frames.first().map_or(false, |f| f.width == self.width && f.height == self.height) {
+            return true;
+        }
+        self.has_reference_frame = false;
         self.mb_width = (self.width + 15) >> 4;
         self.mb_height = (self.height + 15) >> 4;
         self.mb_size = self.mb_width * self.mb_height;
@@ -1683,7 +1717,27 @@ impl Frame {
 
 #[cfg(test)]
 mod edge_mc_tests {
-    use super::process_macroblock;
+    use super::{process_macroblock, Video};
+
+    fn sequence_header(w: u32, h: u32) -> Vec<u8> {
+        let mut v = vec![0, 0, 1, 0xB3, (w >> 4) as u8, ((w & 15) << 4 | h >> 8) as u8, h as u8, 0x13];
+        v.extend([0xFF, 0xFF, 0xE0, 0x00]);
+        v.extend(std::iter::repeat(0).take(160));
+        v
+    }
+
+    #[test]
+    fn new_sequence_header_resizes_the_decoder() {
+        let mut es = sequence_header(32, 16);
+        es.extend(sequence_header(48, 16));
+        es.extend([0, 0, 1, 0x00, 0x00, 0x08, 0xFF, 0xF8]);
+        es.extend([0, 0, 1, 0x00, 0x00, 0x48, 0xFF, 0xF8]);
+        es.extend(std::iter::repeat(0).take(16));
+        let mut v = Video::new(es);
+        assert_eq!(v.width(), 32);
+        v.decode();
+        assert_eq!((v.width(), v.frame(0).y.width), (48, 48));
+    }
 
     #[test]
     fn half_pel_at_bottom_right_edge_repeats_edge_sample() {

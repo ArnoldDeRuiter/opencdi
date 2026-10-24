@@ -79,6 +79,7 @@ Usage: opencdi [options] [disc image (cue, chd, iso, bin)]
   --bios, --standalone  Boot the BIOS shell without a disc
   --no-dvc, --nodvc   Boot without the Digital Video Cartridge
   --slave-debug       Log slave (mouse channel) bytes
+  --run-in-menu       Windows: keep emulating while a menu or dialog is open, or the window is moved (default: paused)
   --console           Windows: show the log in the parent console or a new console window
   --help, -h          Show this text
 ";
@@ -487,6 +488,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         prev_middle: false,
         mouse_captured: true,
         host_input: !has_flag("--no-host-input"),
+        run_in_menu: has_flag("--run-in-menu"),
+        in_modal_pump: false,
         paused: false,
         fast_forward: false,
         last_present: now,
@@ -603,6 +606,9 @@ struct App {
     prev_middle: bool,
     mouse_captured: bool,
     host_input: bool,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    run_in_menu: bool,
+    in_modal_pump: bool,
     occluded: bool,
     paused: bool,
     fast_forward: bool,
@@ -1323,7 +1329,7 @@ impl App {
             }
         }
         // While fast-forwarding, present at most about 60 times a second
-        let due = !self.fast_forward || self.last_present.elapsed() >= Duration::from_millis(16);
+        let due = !self.in_modal_pump && (!self.fast_forward || self.last_present.elapsed() >= Duration::from_millis(16));
         if let Some(window) = self.window.as_ref().filter(|_| !self.occluded && due) {
             window.request_redraw();
         }
@@ -1351,6 +1357,28 @@ impl App {
             self.run_at = now;
             self.next_frame_time = now + target_frame_duration;
         }
+    }
+
+    // --run-in-menu: steps due frames from a Win32 modal loop, where about_to_wait does not run; true if a frame ran
+    #[cfg(target_os = "windows")]
+    fn modal_pump(&mut self, el: &ActiveEventLoop) -> bool {
+        let mut ran = false;
+        for _ in 0..4 {
+            if el.exiting() || Instant::now() < self.run_at {
+                break;
+            }
+            self.in_modal_pump = true;
+            let go = self.tick();
+            self.in_modal_pump = false;
+            ran = true;
+            if !go {
+                el.exit();
+                gui::end_menu();
+                break;
+            }
+            self.schedule_next();
+        }
+        ran
     }
 
     fn present(&mut self) {
@@ -1406,6 +1434,7 @@ impl ApplicationHandler for App {
         // Attach Native Win32 Menu GUI
         #[cfg(target_os = "windows")]
         {
+            gui::set_run_in_modal(self.run_in_menu);
             gui::attach_gui_menu(self.hwnd(), self.bindings.profile, self.input_device_mode, self.m.bus.mcd212.video_mode);
             gui::update_dvc_menu(self.m.bus.dvc.is_fitted());
             // SetMenu takes the menu bar out of the client area; winit adds it back when sizing
@@ -1422,7 +1451,16 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => el.exit(),
-            WindowEvent::RedrawRequested => self.present(),
+            WindowEvent::RedrawRequested => {
+                #[cfg(target_os = "windows")]
+                if self.run_in_menu && gui::modal_active() {
+                    let timer = gui::take_timer_paint();
+                    if !self.modal_pump(el) && timer {
+                        return;
+                    }
+                }
+                self.present();
+            }
             WindowEvent::Resized(size) => {
                 self.image_rect = image_rect(size.width as usize, size.height as usize);
                 if let Some(window) = &self.window {

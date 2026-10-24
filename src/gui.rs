@@ -1,6 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use log::info;
 
 use crate::frontend::{push_action, GuiAction, InputDeviceMode, InputProfile};
@@ -45,6 +46,14 @@ const MF_CHECKED: u32 = 0x0000_0008;
 const MF_UNCHECKED: u32 = 0x0000_0000;
 
 const WM_COMMAND: u32 = 0x0111;
+const WM_TIMER: u32 = 0x0113;
+const WM_ENTERMENULOOP: u32 = 0x0211;
+const WM_EXITMENULOOP: u32 = 0x0212;
+const WM_ENTERSIZEMOVE: u32 = 0x0231;
+const WM_EXITSIZEMOVE: u32 = 0x0232;
+const RDW_INTERNALPAINT: u32 = 0x0002;
+const MODAL_TIMER_ID: usize = 0x0CD1;
+const MODAL_TIMER_MS: u32 = 10;
 const GWLP_WNDPROC: i32 = -4;
 
 const MB_OK: u32 = 0x0000_0000;
@@ -95,6 +104,10 @@ unsafe extern "system" {
     fn SetWindowLongPtrW(hwnd: *mut std::ffi::c_void, nindex: i32, dwnewlong: isize) -> isize;
     fn CallWindowProcW(prev: isize, hwnd: *mut std::ffi::c_void, msg: u32, wparam: usize, lparam: isize) -> isize;
     fn PostMessageW(hwnd: *mut std::ffi::c_void, msg: u32, wparam: usize, lparam: isize) -> i32;
+    fn SetTimer(hwnd: *mut std::ffi::c_void, id: usize, elapse: u32, func: *mut std::ffi::c_void) -> usize;
+    fn KillTimer(hwnd: *mut std::ffi::c_void, id: usize) -> i32;
+    fn RedrawWindow(hwnd: *mut std::ffi::c_void, rect: *const std::ffi::c_void, region: *mut std::ffi::c_void, flags: u32) -> i32;
+    fn EndMenu() -> i32;
 }
 
 #[link(name = "comdlg32")]
@@ -109,6 +122,57 @@ fn to_wide(s: &str) -> Vec<u16> {
 static mut PREV_WNDPROC: isize = 0;
 static mut MENU_HANDLE: *mut std::ffi::c_void = std::ptr::null_mut();
 static mut OWNER_HWND: *mut std::ffi::c_void = std::ptr::null_mut();
+
+// --run-in-menu: menus, dialogs and move/size loops block winit's loop, so a timer drives emulation through WM_PAINT
+static RUN_IN_MODAL: AtomicBool = AtomicBool::new(false);
+static MODAL_DEPTH: AtomicU32 = AtomicU32::new(0);
+static TIMER_PAINT: AtomicBool = AtomicBool::new(false);
+
+pub fn set_run_in_modal(on: bool) {
+    RUN_IN_MODAL.store(on, Ordering::Relaxed);
+}
+
+// True while a Win32 modal loop (menu, dialog, move/size) is running
+pub fn modal_active() -> bool {
+    MODAL_DEPTH.load(Ordering::Relaxed) > 0
+}
+
+// True once per WM_PAINT that the modal timer asked for
+pub fn take_timer_paint() -> bool {
+    TIMER_PAINT.swap(false, Ordering::Relaxed)
+}
+
+// Closes an open menu so a quit requested during the menu loop takes effect
+pub fn end_menu() {
+    unsafe {
+        EndMenu();
+    }
+}
+
+fn modal_begin(hwnd: *mut std::ffi::c_void) {
+    if MODAL_DEPTH.fetch_add(1, Ordering::Relaxed) == 0 && RUN_IN_MODAL.load(Ordering::Relaxed) {
+        unsafe {
+            SetTimer(hwnd, MODAL_TIMER_ID, MODAL_TIMER_MS, std::ptr::null_mut());
+        }
+    }
+}
+
+fn modal_end(hwnd: *mut std::ffi::c_void) {
+    let prev = MODAL_DEPTH.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| Some(d.saturating_sub(1))).unwrap_or(0);
+    if prev == 1 {
+        unsafe {
+            KillTimer(hwnd, MODAL_TIMER_ID);
+        }
+    }
+}
+
+// Runs a modal dialog with the modal timer active
+fn modal<R>(hwnd: *mut std::ffi::c_void, f: impl FnOnce() -> R) -> R {
+    modal_begin(hwnd);
+    let r = f();
+    modal_end(hwnd);
+    r
+}
 
 pub fn update_input_device_menu(mode: InputDeviceMode) {
     unsafe {
@@ -216,17 +280,29 @@ unsafe extern "system" fn custom_wndproc(
     wparam: usize,
     lparam: isize,
 ) -> isize {
+    match msg {
+        WM_ENTERMENULOOP | WM_ENTERSIZEMOVE => modal_begin(hwnd),
+        WM_EXITMENULOOP | WM_EXITSIZEMOVE => modal_end(hwnd),
+        WM_TIMER if wparam == MODAL_TIMER_ID => {
+            TIMER_PAINT.store(true, Ordering::Relaxed);
+            unsafe {
+                RedrawWindow(hwnd, std::ptr::null(), std::ptr::null_mut(), RDW_INTERNALPAINT);
+            }
+            return 0;
+        }
+        _ => {}
+    }
     if msg == WM_COMMAND {
         let menu_id = (wparam & 0xFFFF) as usize;
         match menu_id {
             ID_FILE_INSERT => {
-                if let Some(path) = open_file_dialog(hwnd) {
+                if let Some(path) = modal(hwnd, || open_file_dialog(hwnd)) {
                     push_action(GuiAction::InsertDisc(path));
                 }
                 return 0;
             }
             ID_FILE_OPEN => {
-                if let Some(path) = open_file_dialog(hwnd) {
+                if let Some(path) = modal(hwnd, || open_file_dialog(hwnd)) {
                     push_action(GuiAction::OpenDisc(path));
                 }
                 return 0;
@@ -277,7 +353,7 @@ unsafe extern "system" fn custom_wndproc(
                 return 0;
             }
             ID_CONTROLS_INFO => {
-                show_controls_dialog(hwnd);
+                modal(hwnd, || show_controls_dialog(hwnd));
                 return 0;
             }
             ID_CONTROLS_RELEASE_MOUSE => {
@@ -321,11 +397,11 @@ unsafe extern "system" fn custom_wndproc(
                 return 0;
             }
             ID_HELP_CONTROLS => {
-                show_controls_dialog(hwnd);
+                modal(hwnd, || show_controls_dialog(hwnd));
                 return 0;
             }
             ID_HELP_ABOUT => {
-                show_about_dialog(hwnd);
+                modal(hwnd, || show_about_dialog(hwnd));
                 return 0;
             }
             _ => {}

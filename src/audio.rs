@@ -233,8 +233,8 @@ impl CdiAudio {
         let final_samples = Self::upsample_if_needed(samples, sample_rate);
 
         if let Ok(mut q) = self.sample_queue.lock() {
-            // Cap queue at ~1.0s of audio to prevent latency while avoiding clicks
-            const MAX_QUEUE_SAMPLES: usize = 37800;
+            // Cap queue at ~0.25s of audio to prevent latency while avoiding clicks
+            const MAX_QUEUE_SAMPLES: usize = 37800 / 4;
             let current_len = q.len();
             if current_len + final_samples.len() > MAX_QUEUE_SAMPLES {
                 let overflow = (current_len + final_samples.len()) - MAX_QUEUE_SAMPLES;
@@ -264,7 +264,7 @@ impl CdiAudio {
         let final_samples = Self::upsample_if_needed(samples, sample_rate);
 
         if let Ok(mut sq) = self.sfx_queue.lock() {
-            const MAX_SFX_SAMPLES: usize = 37800;
+            const MAX_SFX_SAMPLES: usize = 37800 / 4;
             let current_len = sq.len();
             if current_len + final_samples.len() > MAX_SFX_SAMPLES {
                 let overflow = (current_len + final_samples.len()) - MAX_SFX_SAMPLES;

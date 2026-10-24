@@ -285,7 +285,7 @@ impl CdiBus {
         } else if self.dvc.is_fitted() && !self.dvc.audio_out.is_empty() {
             if let Ok(mut q) = self.cdic.audio.sample_queue.lock() {
                 self.cdic.audio.source_rate.store(self.dvc.audio_sample_rate, std::sync::atomic::Ordering::Relaxed);
-                let max_samples = self.dvc.audio_sample_rate as usize;
+                let max_samples = self.dvc.audio_sample_rate as usize / 4;
                 let add_len = self.dvc.audio_out.len();
                 let current_len = q.len();
                 if current_len + add_len > max_samples {

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode as Key, ModifiersState, PhysicalKey};
@@ -414,6 +414,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         window: None,
         surface: None,
         image_rect: (0, 0, SCREEN_WIDTH, SCREEN_HEIGHT),
+        windowed: None,
         _host_audio: host_audio,
         gilrs,
         keys: HashSet::new(),
@@ -517,6 +518,7 @@ struct App {
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     image_rect: (usize, usize, usize, usize),
+    windowed: Option<(Option<PhysicalPosition<i32>>, PhysicalSize<u32>)>,
     _host_audio: Option<HostAudioOutput>,
     gilrs: Option<gilrs::Gilrs>,
     keys: HashSet<Key>,
@@ -577,10 +579,20 @@ impl App {
             .unwrap_or(std::ptr::null_mut())
     }
 
-    fn toggle_fullscreen(&self) {
+    fn toggle_fullscreen(&mut self) {
         if let Some(window) = &self.window {
             let full = window.fullscreen().is_none();
+            if full {
+                // A maximised window is restored by the platform itself
+                self.windowed = Some((window.outer_position().ok(), window.inner_size())).filter(|_| !window.is_maximized());
+            }
             window.set_fullscreen(if full { Some(Fullscreen::Borderless(None)) } else { None });
+            if let Some((pos, size)) = self.windowed.take().filter(|_| !full) {
+                if let Some(pos) = pos {
+                    window.set_outer_position(pos);
+                }
+                let _ = window.request_inner_size(size);
+            }
             info!("Schermo intero: {}", if full { "SCHERMO INTERO" } else { "FINESTRA" });
         }
     }

@@ -1,6 +1,8 @@
+mod audio;
 mod input;
 pub mod libretro;
 
+use audio::Pacer;
 use input::Input;
 use libretro::*;
 use opencdi::bios;
@@ -18,7 +20,6 @@ pub const BIOS_NAMES: &[&str] = &["cdi220b.rom", "cdi200.rom", "cdimono1.zip", "
 // Also look in system/same_cdi/bios for zip sets.
 const BIOS_SUBDIRS: &[&str] = &["", "same_cdi/bios"];
 const MESSAGE_FRAMES: c_uint = 360;
-const AUDIO_RATE: u32 = 37800;
 // Room above the size measured at the first serialize_size call, for buffers that grow later (DVC decoder, FIFOs).
 const STATE_HEADROOM: usize = 4 << 20;
 const STATE_ALIGN: usize = 64 << 10;
@@ -47,6 +48,7 @@ struct Core {
     mix: Vec<(f32, f32)>,
     sfx: Vec<(f32, f32)>,
     pcm: Vec<i16>,
+    pacer: Pacer,
     input: Input,
     uart_line: Vec<u8>,
     state_buf: Vec<u8>,
@@ -69,6 +71,7 @@ static CORE: Mutex<Core> = Mutex::new(Core {
     sfx: Vec::new(),
     uart_line: Vec::new(),
     pcm: Vec::new(),
+    pacer: Pacer::new(),
     input: Input::new(),
     state_buf: Vec::new(),
     state_size: 0,
@@ -217,6 +220,7 @@ fn boot(spec: &LoadSpec) -> Result<Machine, String> {
     m.set_video_mode(spec.mode);
     m.reset();
     m.bus.uart_capture = Some(Vec::new());
+    m.bus.dvc_audio_capture = Some(Vec::new());
     Ok(m)
 }
 
@@ -257,7 +261,7 @@ fn spill_to_temp(data: &[u8]) -> Result<PathBuf, String> {
 }
 
 fn fps(mode: VideoMode) -> f64 {
-    1.0 / mode.frame_duration().as_secs_f64()
+    audio::field_rate(mode)
 }
 
 fn region_of(mode: VideoMode) -> c_uint {
@@ -368,7 +372,7 @@ pub unsafe extern "C" fn retro_get_system_av_info(info: *mut retro_system_av_inf
                 max_height: SCREEN_HEIGHT as c_uint,
                 aspect_ratio: 4.0 / 3.0,
             },
-            timing: retro_system_timing { fps: fps(mode), sample_rate: AUDIO_RATE as f64 },
+            timing: retro_system_timing { fps: fps(mode), sample_rate: audio::OUT_RATE as f64 },
         };
         // SAFETY: frontend passes a writable `retro_system_av_info`.
         unsafe { info.write(v) };
@@ -395,31 +399,33 @@ pub extern "C" fn retro_reset() {
             Ok(m) => {
                 core.machine = Some(m);
                 core.input.reset();
+                core.pacer.reset();
             }
             Err(e) => log(RETRO_LOG_ERROR, &format!("reset failed: {}", e)),
         }
     })
 }
 
+// Moves this field's emulator audio into the pacer and sends exactly one field of frames.
 fn send_audio(core: &mut Core, batch: retro_audio_sample_batch_t) {
-    let Core { machine, mix, sfx, pcm, .. } = core;
+    let Core { machine, mix, sfx, pcm, pacer, .. } = core;
     let Some(m) = machine.as_mut() else { return };
     let audio = &m.bus.cdic.audio;
     mix.clear();
     sfx.clear();
     mix.extend(lock(&audio.sample_queue).drain(..));
     sfx.extend(lock(&audio.sfx_queue).drain(..));
-    if mix.len() < sfx.len() {
-        mix.resize(sfx.len(), (0.0, 0.0));
+    pacer.main.push(mix);
+    pacer.sfx.push(sfx);
+    if let Some(cap) = m.bus.dvc_audio_capture.as_mut() {
+        pacer.push_mpeg(cap, m.bus.dvc.audio_sample_rate);
+        cap.clear();
     }
-    for (a, b) in mix.iter_mut().zip(sfx.iter()) {
-        a.0 += b.0;
-        a.1 += b.1;
-    }
+    let out = pacer.field(m.bus.mcd212.video_mode);
     let Some(f) = batch else { return };
     pcm.clear();
     let to_i16 = |x: f32| (x.clamp(-1.0, 1.0) * 32767.0) as i16;
-    pcm.extend(mix.iter().flat_map(|&(l, r)| [to_i16(l), to_i16(r)]));
+    pcm.extend(out.iter().flat_map(|&(l, r)| [to_i16(l), to_i16(r)]));
     let mut done = 0;
     let frames = pcm.len() / 2;
     while done < frames {
@@ -461,12 +467,13 @@ pub extern "C" fn retro_run() {
     })
 }
 
-// Fills `core.state_buf` with the machine state plus the input translator's state.
+// Fills `core.state_buf` with the machine state plus the input translator's and audio pacer's state.
 fn save_state(core: &mut Core) -> bool {
-    let Core { machine, input, state_buf, .. } = core;
+    let Core { machine, input, pacer, state_buf, .. } = core;
     let Some(m) = machine.as_ref() else { return false };
     let mut fe = Vec::new();
     input.save(&mut fe);
+    pacer.save(&mut fe);
     m.save_state(&fe, state_buf);
     true
 }
@@ -516,7 +523,7 @@ pub extern "C" fn retro_unserialize(data: *const c_void, len: usize) -> bool {
         // SAFETY: the frontend passes a readable buffer of `len` bytes.
         let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, len) };
         let mut core = lock(&CORE);
-        let Core { machine, input, .. } = &mut *core;
+        let Core { machine, input, pacer, .. } = &mut *core;
         let Some(m) = machine.as_mut() else { return false };
         let fe = match m.load_state(bytes) {
             Ok(fe) => fe,
@@ -529,6 +536,14 @@ pub extern "C" fn retro_unserialize(data: *const c_void, len: usize) -> bool {
         if let Err(e) = input.load(&mut r) {
             log(RETRO_LOG_WARN, &format!("savestate input section: {}", e));
             input.reset();
+            return false;
+        }
+        // States from before the pacer have no audio section; start with empty FIFOs.
+        if r.remaining() == 0 {
+            pacer.reset();
+        } else if let Err(e) = pacer.load(&mut r) {
+            log(RETRO_LOG_WARN, &format!("savestate audio section: {}", e));
+            pacer.reset();
             return false;
         }
         true
@@ -594,6 +609,7 @@ fn load(game: *const retro_game_info) -> Result<(), String> {
     core.spec = Some(spec);
     core.temp_disc = temp;
     core.input.reset();
+    core.pacer.reset();
     core.state_size = 0;
     Ok(())
 }
@@ -601,6 +617,13 @@ fn load(game: *const retro_game_info) -> Result<(), String> {
 fn unload() {
     let mut core = lock(&CORE);
     flush_uart_line(&mut core.uart_line);
+    if core.machine.is_some() {
+        let p = &core.pacer;
+        log(RETRO_LOG_INFO, &format!(
+            "audio: {} frames sent; prefill restarts main={} sfx={} mpeg={}; dropped main={} sfx={} mpeg={}",
+            p.frames_out, p.main.restarts, p.sfx.restarts, p.mpeg.restarts, p.main.dropped, p.sfx.dropped, p.mpeg.dropped
+        ));
+    }
     core.machine = None;
     core.spec = None;
     core.state_size = 0;

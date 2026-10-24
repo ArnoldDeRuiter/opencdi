@@ -1425,6 +1425,7 @@ dependencies = [
  "chd",
  "cpal",
  "env_logger",
+ "flate2",
  "gilrs",
  "log",
  "m68k",

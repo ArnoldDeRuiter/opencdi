@@ -2,6 +2,7 @@
 extern crate self as opencdi;
 
 pub mod audio;
+pub mod bios;
 pub mod bus;
 pub mod cdic;
 pub mod cdrom;

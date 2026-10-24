@@ -1313,3 +1313,47 @@ impl Dvc {
         }
     }
 }
+
+// Savestate: the DVC ROM is re-loaded by path, never stored.
+opencdi::impl_state!(Dvc {
+    ram1, ram2, ram2_enabled, reg_write_count, reg_read_count, rom_read_count,
+    fma_regs, fmv_regs,
+    fma_cmd, fma_isr, fma_ier, fma_ivec, fmv_isr, fmv_ier, fmv_ivec, fmv_playback_active, fmv_decoder_active,
+    total_cycles, dclk, dclk_accum, timer_accum, timer_counter,
+    video_playing, video_armed, decoder_enabled, audio_armed, audio_enabled, vcd_pixel_clock_13_5,
+    display_timecode, decoder_timecode, display_frame_counter, decoder_frame_counter, fps, frame_accum, vsync_hz,
+    dvc_stream_fifo, fma_stream_fifo, transfer_for_fma, fma_dma_seen, dma_requested, framebuffer,
+    demux, fma_demux, mp2, audio_sample_rate, audio_out,
+    video_decoder, video_width, video_height, frames_decoded_count, frames_presented_count, vsync_counter,
+    underflow_count, fma_underflow_count, has_valid_frame,
+} skip {
+    rom,
+});
+
+opencdi::impl_state!(MpegSystemDemux {
+    pending, video, audio, last_scr, first_video_pts, last_video_pts, last_video_dts, first_audio_pts, last_audio_pts,
+    selected_audio_stream, selected_video_stream, program_ends,
+} skip {});
+
+// The oxideav synthesis filterbank is private to that crate: it is not saved and restarts from zero on load.
+impl opencdi::savestate::State for Mp2Decoder {
+    fn save(&self, w: &mut Vec<u8>) {
+        let Self { state: _, pcm, last_sample_rate, errors, resync_bytes, synchronized, conceal_discontinuity_frame, concealed_frames } = self;
+        pcm.save(w);
+        (*last_sample_rate, *errors, *resync_bytes).save(w);
+        (*synchronized, *conceal_discontinuity_frame, *concealed_frames).save(w);
+    }
+
+    fn load(&mut self, r: &mut opencdi::savestate::Reader) -> Result<(), opencdi::savestate::StateError> {
+        let Self { state, pcm, last_sample_rate, errors, resync_bytes, synchronized, conceal_discontinuity_frame, concealed_frames } = self;
+        pcm.load(r)?;
+        last_sample_rate.load(r)?;
+        errors.load(r)?;
+        resync_bytes.load(r)?;
+        synchronized.load(r)?;
+        conceal_discontinuity_frame.load(r)?;
+        concealed_frames.load(r)?;
+        state.reset();
+        Ok(())
+    }
+}

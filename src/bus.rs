@@ -984,8 +984,8 @@ mod tests {
 opencdi::impl_state_enum!(SharedIn4Owner { Idle = 0, Cdic = 1, Vmpeg = 2 });
 
 opencdi::impl_state!(CdiBus {
-    sys_ram, cdic, dma, mcd212, nvram, slave, shared_in4_owner, scc_timer, scc_uart_cmd, scc_uart_tx_irq,
+    sys_ram, dvc, cdic, dma, mcd212, nvram, slave, shared_in4_owner, scc_timer, scc_uart_cmd, scc_uart_tx_irq,
     current_pc, wait_cycles, current_line_cycle, emulate_wait_states, current_frame,
 } skip {
-    rom, dvc, cdrom, uart_capture, trace_setup, watch_addr1, watch_addr2, watch_enabled, trace_fmv,
+    rom, cdrom, uart_capture, trace_setup, watch_addr1, watch_addr2, watch_enabled, trace_fmv,
 });

@@ -1210,7 +1210,6 @@ impl Dvc {
                 self.set_fmv_word(0x54, decoded_h as u16);
                 self.set_fmv_word(0x06, 0x23);  // PRPA
                 self.set_fmv_word(0x56, 1800);  // Frame rate ratio
-                self.set_fmv_word(0x55, 1800);  // Display period
 
                 // Advance timecodes
                 self.advance_display_timecode();

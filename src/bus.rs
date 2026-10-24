@@ -279,7 +279,7 @@ impl CdiBus {
         if line >= vblank_lines && line < total_lines {
             let active_line = line - vblank_lines;
             if self.dvc.is_fitted() {
-                self.dvc.get_scanline(active_line, &mut self.mcd212.external_video_line);
+                self.dvc.get_scanline(active_line, &mut self.mcd212.external_video_line, &mut self.mcd212.external_video_present);
             }
         }
         if line == 0 {

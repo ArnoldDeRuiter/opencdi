@@ -22,6 +22,12 @@ pub const FMV_VIDCMD: usize = 0xC2;
 pub const FMV_STREAM: usize = 0xC4;
 pub const FMV_IVEC: usize = 0xDC;
 pub const FMV_XFER: usize = 0xDE;
+pub const FMV_BORDER_R: usize = 0x66;
+pub const FMV_SCRPOS_Y: usize = 0x74;
+
+// Largest MPEG-1 picture the DVC framebuffer holds (constrained parameters).
+pub const FB_MAX_W: usize = 768;
+pub const FB_MAX_H: usize = 576;
 
 // FMA Register Byte Offsets (within 0xE03000..0xE030FF)
 pub const FMA_CMD: usize = 0x00;
@@ -437,7 +443,10 @@ pub struct Dvc {
     pub transfer_for_fma: bool,
     pub fma_dma_seen: bool,
     pub dma_requested: bool,
-    pub framebuffer: Box<[u32; 352 * 288]>,
+    pub framebuffer: Box<[u32; FB_MAX_W * FB_MAX_H]>,
+    /// Display window latched by VIDCMD WIN: screen y, screen x, height, width, picture y, picture x (pixels, x in normal resolution).
+    pub window: [u16; 6],
+    pub border_color: u32,
 
     pub demux: MpegSystemDemux,
     pub fma_demux: MpegSystemDemux,
@@ -508,7 +517,9 @@ impl Dvc {
             transfer_for_fma: false,
             fma_dma_seen: false,
             dma_requested: false,
-            framebuffer: vec![0xFF00_0000; 352 * 288].into_boxed_slice().try_into().unwrap(),
+            framebuffer: vec![0xFF00_0000; FB_MAX_W * FB_MAX_H].into_boxed_slice().try_into().unwrap(),
+            window: [0; 6],
+            border_color: 0xFF00_0000,
 
             demux: MpegSystemDemux::default(),
             fma_demux: MpegSystemDemux::default(),
@@ -535,6 +546,8 @@ impl Dvc {
         self.ram1.fill(0);
         self.ram2.fill(0);
         self.framebuffer.fill(0xFF00_0000);
+        self.window = [0; 6];
+        self.border_color = 0xFF00_0000;
         self.has_valid_frame = false;
         self.ram2_enabled = false;
         self.reg_write_count = 0;
@@ -985,6 +998,9 @@ impl Dvc {
                 }
             }
             FMV_VIDCMD => {
+                if value & 0x0008 != 0 { // WIN: apply position, window, offset and border
+                    self.latch_window();
+                }
                 if value & 0x0004 != 0 || value & 0x0008 != 0 {
                     self.or_fmv_word(FMV_ISR, FMV_IRQ_VCUP | FMV_IRQ_DCL);
                 }
@@ -1191,8 +1207,8 @@ impl Dvc {
                     }
                     decoded_w = decoder.width();
                     decoded_h = decoder.height();
-                    let target_w = (decoded_w as usize).min(352).max(1);
-                    let target_h = (decoded_h as usize).min(288).max(1);
+                    let target_w = (decoded_w as usize).min(FB_MAX_W).max(1);
+                    let target_h = (decoded_h as usize).min(FB_MAX_H).max(1);
                     decoder.frame(frame_idx).write_rgb_scaled(&mut *self.framebuffer, target_w, target_h);
                     self.video_width = target_w;
                     self.video_height = target_h;
@@ -1296,48 +1312,45 @@ impl Dvc {
         }
     }
 
-    pub fn get_scanline(&self, active_line: usize, out: &mut [u32; 768]) {
-        out.fill(0xFF00_0000);
+    fn latch_window(&mut self) {
+        for i in 0..6 {
+            self.window[i] = self.get_fmv_word(FMV_SCRPOS_Y + i * 2);
+        }
+        // Border components are studio-range levels (16 = black); expand like the MCD212 output does.
+        let level = |off: usize| ((((self.get_fmv_word(off) & 0xFF) as i32 - 16) * 298 + 128) >> 8).clamp(0, 255) as u32;
+        self.border_color = 0xFF00_0000 | (level(FMV_BORDER_R) << 16) | (level(FMV_BORDER_R + 2) << 8) | level(FMV_BORDER_R + 4);
+    }
+
+    /// One field line of DVC output at 768 high-resolution pixels; `present` marks pixels inside the display window.
+    pub fn get_scanline(&self, active_line: usize, out: &mut [u32; 768], present: &mut [bool; 768]) {
+        present.fill(false);
         if !self.has_valid_frame {
+            out.fill(0xFF00_0000);
             return;
         }
-
-        let disp_h = (self.get_fmv_word(0x04) as usize).min(288);
-        let disp_h = if disp_h == 0 {
-            if self.video_height > 0 { self.video_height } else { 240 }
-        } else {
-            disp_h
-        };
-        let reg_y = self.get_fmv_word(0x6C) as usize;
-        let y_start = if reg_y > 0 && reg_y != 26 && reg_y <= 240 {
-            reg_y
-        } else {
-            (240usize.saturating_sub(disp_h)) / 2
-        };
-        let y_end = y_start + disp_h;
-        if active_line >= y_start && active_line < y_end {
-            let dy = active_line - y_start;
-            let disp_w = (self.get_fmv_word(0x02) as usize).min(352);
-            let disp_w = if disp_w == 0 {
-                if self.video_width > 0 { self.video_width } else { 352 }
-            } else {
-                disp_w
-            };
-            let pitch = if self.video_width > 0 { self.video_width } else { disp_w };
-            let x_start = (768usize.saturating_sub(disp_w * 2)) / 2;
-            for dx in 0..disp_w {
-                let px_idx = dy * pitch + dx;
-                let pixel = if px_idx < self.framebuffer.len() {
-                    self.framebuffer[px_idx]
-                } else {
-                    0xFF00_0000
-                };
-                let target_x = x_start + dx * 2;
-                if target_x + 1 < 768 {
-                    out[target_x] = pixel;
-                    out[target_x + 1] = pixel;
-                }
+        out.fill(self.border_color);
+        let [pos_y, pos_x, win_h, win_w, off_y, off_x] = self.window.map(usize::from);
+        let (pic_w, pic_h) = (self.video_width, self.video_height);
+        // The window is clipped to the decoded picture (mv_window adapts its size the same way).
+        let off_x = off_x.min(pic_w);
+        let off_y = off_y.min(pic_h);
+        let win_w = win_w.min(pic_w - off_x);
+        let win_h = win_h.min(pic_h - off_y);
+        if active_line < pos_y || active_line >= pos_y + win_h {
+            return;
+        }
+        let row = (off_y + active_line - pos_y) * pic_w + off_x;
+        // One picture pixel per normal-resolution pixel, so two high-resolution pixels each; no scaling.
+        for col in 0..win_w {
+            let x = (pos_x + col) * 2;
+            if x + 1 >= 768 {
+                break;
             }
+            let pixel = self.framebuffer[row + col];
+            out[x] = pixel;
+            out[x + 1] = pixel;
+            present[x] = true;
+            present[x + 1] = true;
         }
     }
 }
@@ -1350,7 +1363,7 @@ opencdi::impl_state!(Dvc {
     total_cycles, dclk, dclk_accum, timer_accum, timer_counter,
     video_playing, video_armed, decoder_enabled, audio_armed, audio_enabled, vcd_pixel_clock_13_5,
     display_timecode, decoder_timecode, display_frame_counter, decoder_frame_counter, fps, frame_accum, vsync_hz,
-    dvc_stream_fifo, fma_stream_fifo, transfer_for_fma, fma_dma_seen, dma_requested, framebuffer,
+    dvc_stream_fifo, fma_stream_fifo, transfer_for_fma, fma_dma_seen, dma_requested, framebuffer, window, border_color,
     demux, fma_demux, mp2, audio_sample_rate, audio_out,
     video_decoder, video_width, video_height, frames_decoded_count, frames_presented_count, vsync_counter,
     underflow_count, fma_underflow_count, fma_decoded_since_play, has_valid_frame,
@@ -1388,5 +1401,38 @@ impl opencdi::savestate::State for Mp2Decoder {
             let _ = oxideav_mp2::frame::decode_frame_with(last_frame, state);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    #[test]
+    fn window_places_and_clips_the_picture() {
+        let mut d = Dvc::new();
+        d.video_width = 8;
+        d.video_height = 4;
+        for (i, px) in d.framebuffer[..32].iter_mut().enumerate() {
+            *px = 0xFF00_0000 | i as u32;
+        }
+        d.has_valid_frame = true;
+        // Screen y 10, x 5; window 3 lines by 6 pixels; picture offset y 1, x 4 (width clips to 4).
+        for (i, v) in [10u16, 5, 3, 6, 1, 4].iter().enumerate() {
+            d.set_fmv_word(FMV_SCRPOS_Y + i * 2, *v);
+        }
+        d.set_fmv_word(FMV_VIDCMD, 0x0008);
+        d.handle_fmv_write(FMV_VIDCMD);
+        let mut out = [0u32; 768];
+        let mut present = [false; 768];
+        d.get_scanline(9, &mut out, &mut present);
+        assert!(!present.iter().any(|&p| p));
+        d.get_scanline(10, &mut out, &mut present);
+        assert_eq!(&out[10..18], &[0xFF00_000C, 0xFF00_000C, 0xFF00_000D, 0xFF00_000D, 0xFF00_000E, 0xFF00_000E, 0xFF00_000F, 0xFF00_000F]);
+        assert!(present[10..18].iter().all(|&p| p) && !present[9] && !present[18]);
+        d.get_scanline(12, &mut out, &mut present);
+        assert_eq!(out[10], 0xFF00_001C);
+        d.get_scanline(13, &mut out, &mut present);
+        assert!(!present.iter().any(|&p| p));
     }
 }

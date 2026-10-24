@@ -170,6 +170,7 @@ pub struct Mcd212 {
     pub vblank_irq: bool,
     pub video_mode: VideoMode,
     pub external_video_line: [u32; 768],
+    pub external_video_present: [bool; 768],
     pub trace_dca: bool,
 }
 
@@ -267,6 +268,7 @@ impl Mcd212 {
             vblank_irq: false,
             video_mode: VideoMode::Pal,
             external_video_line: [0xFF00_0000; 768],
+            external_video_present: [false; 768],
             trace_dca: false,
         };
         mcd.init_default_palette();
@@ -317,6 +319,7 @@ impl Mcd212 {
         self.scanline_cycles = 0;
         self.vblank_irq = false;
         self.external_video_line.fill(0xFF00_0000);
+        self.external_video_present.fill(false);
         self.init_default_palette();
     }
 
@@ -1254,7 +1257,7 @@ opencdi::impl_state!(Mcd212 {
     cursor_position, cursor_control, cursor_pattern, matte_control, backdrop_color, mosaic_hold, weight_factor, matte_flag,
     blink_time, blink_active,
     framebuffer, interlace_field,
-    scanline, scanline_cycles, vblank_irq, video_mode, external_video_line,
+    scanline, scanline_cycles, vblank_irq, video_mode, external_video_line, external_video_present,
 } skip {
     s_4bpp_color, delta_y_lut, delta_uv_lut, dyuv_limit_lut, dyuv_u_to_b, dyuv_u_to_g, dyuv_v_to_g, dyuv_v_to_r, trace_dca,
 });

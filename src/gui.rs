@@ -372,7 +372,7 @@ pub fn attach_gui_menu(
         // 1. File Menu
         let file_menu = CreatePopupMenu();
         AppendMenuW(file_menu, MF_STRING, ID_FILE_INSERT, to_wide("Insert Disc (Hot-swap)...\tCtrl+I").as_ptr());
-        AppendMenuW(file_menu, MF_STRING, ID_FILE_OPEN, to_wide("Open Disc & Restart Console...\tCtrl+O").as_ptr());
+        AppendMenuW(file_menu, MF_STRING, ID_FILE_OPEN, to_wide("Open Disc && Restart Console...\tCtrl+O").as_ptr());
         AppendMenuW(file_menu, MF_STRING, ID_FILE_EJECT, to_wide("Eject Disc").as_ptr());
         AppendMenuW(file_menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(file_menu, MF_STRING, ID_FILE_RESET, to_wide("Restart Console (Reset)\tF5 / H").as_ptr());
@@ -509,7 +509,7 @@ pub fn show_controls_dialog(owner: *mut std::ffi::c_void) {
            • F5 or H: Restart console (Reset)\n\
            • P: Pause  |  Space (hold): Fast-forward\n\
            • F8: Screenshot (PPM)  |  F12: Screenshot (BMP)\n\
-           • F2 / F4: Save / Load state  |  F6 / F7: State slot (not implemented yet)\n\
+           • F2 / F4: Save / Load state  |  F6 / F7: State slot\n\
            • Ctrl+I: Insert disc  |  Ctrl+O: Open disc image and restart\n\
            • M: Mute / Unmute audio  |  + / - : Adjust volume\n\
            • Esc: Quit"

@@ -85,6 +85,7 @@ Usage: opencdi [options] [disc image (cue, chd, iso, bin)]
   --mouse             Start in mouse mode (host mouse drives the CD-i pointer)
   --no-host-input     Ignore host keyboard, mouse and gamepads; never grab the cursor
   --bios, --standalone  Boot the BIOS shell without a disc
+  --dvc <path>        Digital Video Cartridge ROM (default: search dvc/, bios/, the current and the program directory)
   --no-dvc, --nodvc   Boot without the Digital Video Cartridge
   --slave-debug       Log slave (mouse channel) bytes
   --run-in-menu       Windows: keep emulating while a menu or dialog is open, or the window is moved (default: paused)
@@ -391,8 +392,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2b. Load DVC ROM (Digital Video Cartridge) by default if present
     let dvc_disabled = has_flag("--no-dvc") || has_flag("--nodvc");
+    let dvc_arg = flag_value("--dvc").map(PathBuf::from);
     if !dvc_disabled {
-        if let Some(dvc_path) = find_dvc_rom() {
+        if let Some(dvc_path) = dvc_arg.clone().or_else(find_dvc_rom) {
             if let Ok(_) = m.load_dvc(&dvc_path) {
                 info!("Loaded Digital Video Cartridge (DVC) ROM from {:?}", dvc_path);
             }
@@ -410,7 +412,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut disc_arg = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--rom" || a == "--frames" {
+        if a == "--rom" || a == "--frames" || a == "--dvc" {
             it.next();
         } else if !a.starts_with("--") {
             disc_arg = Some(a.clone());
@@ -481,6 +483,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bindings,
         input_device_mode,
         dvc_disabled,
+        dvc_arg,
         max_frames,
         current_game_name,
         window: None,
@@ -600,6 +603,7 @@ struct App {
     bindings: KeyBindings,
     input_device_mode: InputDeviceMode,
     dvc_disabled: bool,
+    dvc_arg: Option<PathBuf>,
     max_frames: Option<u64>,
     current_game_name: String,
     window: Option<Rc<Window>>,
@@ -862,7 +866,7 @@ impl App {
                             info!("Disc loaded successfully: {}", self.current_game_name);
 
                             if !self.dvc_disabled && !self.m.bus.dvc.is_fitted() {
-                                if let Some(dvc_path) = find_dvc_rom() {
+                                if let Some(dvc_path) = self.dvc_arg.clone().or_else(find_dvc_rom) {
                                     if let Ok(_) = self.m.load_dvc(&dvc_path) {
                                         info!("Loaded Digital Video Cartridge (DVC) extension from {:?}", dvc_path);
                                         #[cfg(target_os = "windows")]
@@ -981,7 +985,7 @@ impl App {
                         #[cfg(target_os = "windows")]
                         gui::update_dvc_menu(false);
                     } else {
-                        if let Some(dvc_path) = find_dvc_rom() {
+                        if let Some(dvc_path) = self.dvc_arg.clone().or_else(find_dvc_rom) {
                             if let Ok(_) = self.m.load_dvc(&dvc_path) {
                                 info!("Inserted Digital Video Cartridge (DVC) from {:?}", dvc_path);
                                 #[cfg(target_os = "windows")]

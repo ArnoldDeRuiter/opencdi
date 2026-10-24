@@ -32,7 +32,7 @@ impl Os9Trace {
         let path = std::env::var_os("CDI_OS9_TRACE")?;
         let file = File::create(&path).map_err(|e| eprintln!("CDI_OS9_TRACE: {e}")).ok()?;
         let mut out = BufWriter::new(file);
-        let _ = writeln!(out, "# os9 trace: C=call R=return; regs before/after; str=a0 text for name calls");
+        let _ = writeln!(out, "# os9 trace: C=call R=return; regs before/after; str=a0 text for name calls; mem=32 bytes at a0 for status calls");
         Some(Box::new(Self { out, seq: 0, frame: 0, pending: Vec::new(), modules: Vec::new() }))
     }
 
@@ -57,6 +57,18 @@ impl Os9Trace {
         push_regs(&mut line, cpu, true);
         if trap == 0 && NAME_CALLS.contains(&code) {
             let _ = write!(line, " str=\"{}\"", read_text(bus, cpu.a(0), 64));
+        }
+        if trap == 0 && code == 0x53 && matches!(cpu.d(1) & 0x7FFF, 0 | 2 | 3) {
+            let _ = write!(line, " str=\"{}\"", read_text(bus, cpu.a(0), 32));
+        }
+        if trap == 0 && (code == 0x8D || code == 0x8E) {
+            line.push_str(" mem=");
+            for i in 0..32 {
+                match bus.peek_byte(cpu.a(0).wrapping_add(i)) {
+                    Some(b) => { let _ = write!(line, "{b:02X}"); }
+                    None => break,
+                }
+            }
         }
         if trap == 0 && (code == 0x8A || code == 0x8C) {
             let n = cpu.d(1).min(32);

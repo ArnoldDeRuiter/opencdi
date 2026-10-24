@@ -444,6 +444,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         run_at: now,
         next_frame_time: now,
         fps_timer: now,
+        telemetry_frames: 0,
+        paused_ticks: 0,
         measured_fps: 50.0,
         prev_instructions: 0,
         prev_cd_sectors: 0,
@@ -545,6 +547,8 @@ struct App {
     run_at: Instant,
     next_frame_time: Instant,
     fps_timer: Instant,
+    telemetry_frames: u32,
+    paused_ticks: u32,
     measured_fps: f64,
     prev_instructions: u64,
     prev_cd_sectors: u32,
@@ -664,8 +668,7 @@ impl App {
                 if let Err(e) = self.set_frontend_state(&fe) {
                     error!("State slot {}: frontend section unreadable ({}); autoplay state kept", self.state_slot, e);
                 }
-                self.prev_instructions = self.m.instructions;
-                self.prev_cd_sectors = self.m.bus.cdic.curr_lba;
+                self.reset_telemetry();
                 info!("State slot {} loaded from {:?}", self.state_slot, path);
             }
             Err(e) => error!("State slot {} not loaded from {:?}: {}", self.state_slot, path, e),
@@ -684,6 +687,8 @@ impl App {
             Key::KeyP if !ctrl && !self.bound(code) => {
                 self.paused = !self.paused;
                 info!("Emulation: {}", if self.paused { "PAUSED" } else { "RUNNING" });
+                self.reset_telemetry();
+                self.refresh_title();
             }
             Key::F11 => self.toggle_fullscreen(),
             Key::Enter | Key::NumpadEnter if alt => self.toggle_fullscreen(),
@@ -694,6 +699,7 @@ impl App {
             Key::F6 | Key::F7 => {
                 self.state_slot = if code == Key::F6 { self.state_slot.saturating_sub(1) } else { (self.state_slot + 1).min(999) };
                 info!("State slot: {} ({:?})", self.state_slot, self.state_file());
+                self.refresh_title();
             }
             Key::KeyM if !self.bound(code) => {
                 self.m.bus.cdic.audio.muted = !self.m.bus.cdic.audio.muted;
@@ -761,7 +767,7 @@ impl App {
                             self.mouse_captured = true;
                             self.m.bus.emulate_wait_states = true;
                             self.next_frame_time = Instant::now();
-                            self.fps_timer = Instant::now();
+                            self.reset_telemetry();
                         }
                         Err(e) => {
                             error!("Failed to load disc {:?}: {:?}", path, e);
@@ -788,7 +794,7 @@ impl App {
                     self.mouse_captured = true;
                     self.m.bus.emulate_wait_states = true;
                     self.next_frame_time = Instant::now();
-                    self.fps_timer = Instant::now();
+                    self.reset_telemetry();
                 }
                 GuiAction::Exit => {
                     info!("Exit requested from File menu");
@@ -837,6 +843,7 @@ impl App {
                     #[cfg(target_os = "windows")]
                     gui::update_video_menu(mode);
                     info!("Video mode set to: {:?}", mode);
+                    self.reset_telemetry();
                 }
                 GuiAction::ToggleWaitStates => {
                     self.m.bus.emulate_wait_states = !self.m.bus.emulate_wait_states;
@@ -1103,15 +1110,25 @@ impl App {
         }
     }
 
+    // Start a fresh speed window (pause, video mode switch, reset, fast-forward toggle)
+    fn reset_telemetry(&mut self) {
+        self.fps_timer = Instant::now();
+        self.telemetry_frames = 0;
+        self.prev_instructions = self.m.instructions;
+        self.prev_cd_sectors = self.m.bus.cdic.curr_lba;
+        self.buffer_flips_interval = 0;
+    }
+
     fn update_telemetry(&mut self) {
+        self.telemetry_frames += 1;
         let m = &self.m;
         let fps_interval = if m.bus.mcd212.video_mode == VideoMode::Pal { 25 } else { 30 };
-        if self.frame_count % fps_interval != 0 {
+        if self.telemetry_frames < fps_interval {
             return;
         }
         let elapsed_secs = self.fps_timer.elapsed().as_secs_f64();
         if elapsed_secs > 0.0 {
-            self.measured_fps = (fps_interval as f64) / elapsed_secs;
+            self.measured_fps = (self.telemetry_frames as f64) / elapsed_secs;
             let inst_delta = m.instructions.saturating_sub(self.prev_instructions);
             self.measured_mips = (inst_delta as f64 / elapsed_secs) / 1_000_000.0;
             self.prev_instructions = m.instructions;
@@ -1125,6 +1142,7 @@ impl App {
             self.buffer_flips_interval = 0;
         }
         self.fps_timer = Instant::now();
+        self.telemetry_frames = 0;
 
         let target_fps = m.bus.mcd212.video_mode.fps();
         let speed_pct = (self.measured_fps / target_fps) * 100.0;
@@ -1143,6 +1161,12 @@ impl App {
             );
         }
 
+        self.refresh_title();
+    }
+
+    // Title bar from the last measurements; shows PAUSED instead of the speed while paused
+    fn refresh_title(&self) {
+        let m = &self.m;
         let video_mode = match m.bus.mcd212.video_mode {
             VideoMode::Pal => "50Hz (PAL)",
             VideoMode::Ntsc => "60Hz (NTSC)",
@@ -1159,10 +1183,16 @@ impl App {
         } else {
             format!("{:.0} FPS", self.measured_fps)
         };
+        let speed = if self.paused {
+            format!("PAUSED ({})", video_mode)
+        } else {
+            let speed_pct = (self.measured_fps / m.bus.mcd212.video_mode.fps()) * 100.0;
+            format!("{:.0}% ({:.1} FPS {})", speed_pct, self.measured_fps, video_mode)
+        };
         if let Some(window) = &self.window {
             window.set_title(&format!(
-                "OpenCDi – {} | {:.0}% ({:.1} FPS {}) | CPU: {:.2} MIPS | CD: {} | Render: {} | WaitStates: {} | Slot: {}",
-                self.current_game_name, speed_pct, self.measured_fps, video_mode, self.measured_mips, cd_str, render_str, wait_status, self.state_slot
+                "OpenCDi – {} | {} | CPU: {:.2} MIPS | CD: {} | Render: {} | WaitStates: {} | Slot: {}",
+                self.current_game_name, speed, self.measured_mips, cd_str, render_str, wait_status, self.state_slot
             ));
         }
     }
@@ -1173,6 +1203,11 @@ impl App {
             return false;
         }
         if self.paused {
+            // Keep the title live (disc, slot, wait states) at about two updates a second
+            self.paused_ticks += 1;
+            if self.paused_ticks % 25 == 0 {
+                self.refresh_title();
+            }
             return true;
         }
         self.autoplay();
@@ -1351,6 +1386,7 @@ impl ApplicationHandler for App {
         if ff != self.fast_forward {
             self.fast_forward = ff;
             info!("Fast-forward: {}", if ff { "ON" } else { "OFF" });
+            self.reset_telemetry();
         }
         let now = Instant::now();
         if !ff && now < self.run_at {

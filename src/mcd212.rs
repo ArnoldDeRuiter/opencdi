@@ -1245,9 +1245,9 @@ impl Mcd212 {
     }
 }
 
-crate::impl_state_enum!(VideoMode { Pal = 0, Ntsc = 1 });
+opencdi::impl_state_enum!(VideoMode { Pal = 0, Ntsc = 1 });
 
-crate::impl_state!(Mcd212 {
+opencdi::impl_state!(Mcd212 {
     plane_a, plane_b, display_plane_a, display_plane_b,
     csrr, csrw, dcr, vsr, ddr, dcp, dca,
     clut, clut_bank, image_coding_method, transparency_control, plane_order, transparent_color, mask_color, dyuv_abs_start,

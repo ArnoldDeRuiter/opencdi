@@ -392,11 +392,11 @@ impl SlaveHle {
     }
 }
 
-crate::impl_state!(SlaveChannel {
+opencdi::impl_state!(SlaveChannel {
     out_buf, out_count, out_index, out_cmd, in_buf, in_count, in_index, pending_buf, pending_count, pending_cmd,
 } skip {});
 
-crate::impl_state!(SlaveHle {
+opencdi::impl_state!(SlaveHle {
     channels, device_mouse_x, device_mouse_y, device_mouse_updated, mouse_btn, center_x, center_y,
     input_mouse_x, input_mouse_y, input_mouse_btn,
     irq_pending, has_disc, disc_state, disc_timer, xbus_interrupt_enable, video_mode, stream_counter,

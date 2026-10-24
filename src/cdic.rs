@@ -800,7 +800,7 @@ impl Cdic {
     }
 }
 
-crate::impl_state!(Cdic {
+opencdi::impl_state!(Cdic {
     ram, audio,
     command, time, file, channel, audio_channel, audio_buffer, x_buffer, dma_control, z_buffer, interrupt_vector, data_buffer,
     disc_command, disc_mode, disc_spinup_counter, curr_lba,

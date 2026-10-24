@@ -982,9 +982,9 @@ mod tests {
     }
 }
 
-crate::impl_state_enum!(SharedIn4Owner { Idle = 0, Cdic = 1, Vmpeg = 2 });
+opencdi::impl_state_enum!(SharedIn4Owner { Idle = 0, Cdic = 1, Vmpeg = 2 });
 
-crate::impl_state!(CdiBus {
+opencdi::impl_state!(CdiBus {
     sys_ram, cdic, dma, mcd212, nvram, slave, shared_in4_owner, scc_timer, scc_uart_cmd, scc_uart_tx_irq,
     current_pc, wait_cycles, current_line_cycle, emulate_wait_states, current_frame,
 } skip {

@@ -43,4 +43,4 @@ impl Timekeeper {
     }
 }
 
-crate::impl_state!(Timekeeper { ram } skip {});
+opencdi::impl_state!(Timekeeper { ram } skip {});

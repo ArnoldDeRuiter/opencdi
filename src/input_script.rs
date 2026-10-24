@@ -138,6 +138,7 @@ pub fn parse(text: &str) -> Result<Vec<Event>, String> {
 }
 
 // Applies a script frame by frame; `step` says what to pass to `update_mouse` before that frame's `run_frame`.
+#[derive(Clone)]
 pub struct Player {
     events: Vec<Event>,
     next: usize,

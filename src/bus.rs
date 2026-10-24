@@ -325,7 +325,6 @@ impl CdiBus {
             self.current_frame, start, count, self.dvc.transfer_for_fma, b16);
 
         let for_fma = self.dvc.transfer_for_fma;
-        if crate::dvc::dvc_trace_on() { eprintln!("DVCT f={} DMA fma={} words={}", crate::dvc::TRACE_VS.load(std::sync::atomic::Ordering::Relaxed), for_fma, count); }
         for i in 0..count {
             let addr = start.wrapping_add(i * 2);
             let hi = self.read_byte(addr);

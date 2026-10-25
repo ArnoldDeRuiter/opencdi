@@ -17,10 +17,9 @@ use std::sync::{Mutex, MutexGuard};
 
 // Looked up case-insensitively in the system directory and BIOS_SUBDIRS, in this order; Mono-IV images are reported, not booted.
 pub const BIOS_NAMES: &[&str] = &["cdi220b.rom", "cdi200.rom", "cdimono1.zip", "cdibios.zip", "cdi.rom", "cdi220.rom", "cdi490a.rom", "cdi490a.zip"];
-// Cartridge ROM, looked up the same way; MAME's cdimono1.zip carries vmpega.rom next to the system ROMs.
+// Cartridge ROM, looked up the same way; cdimono1.zip carries vmpega.rom next to the system ROMs.
 pub const DVC_NAMES: &[&str] = &["vmpega.rom", "cdimono1.zip", "cdibios.zip"];
-// Also look in system/same_cdi/bios for zip sets.
-const BIOS_SUBDIRS: &[&str] = &["", "same_cdi/bios"];
+const BIOS_SUBDIRS: &[&str] = &[""];
 const MESSAGE_FRAMES: c_uint = 360;
 // Room above the size measured at the first serialize_size call, for buffers that grow later (DVC decoder, FIFOs).
 const STATE_HEADROOM: usize = 4 << 20;
@@ -787,7 +786,7 @@ mod tests {
     fn temp_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("opencdi-bios-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(d.join("same_cdi/bios")).unwrap();
+        std::fs::create_dir_all(&d).unwrap();
         d
     }
 
@@ -799,10 +798,10 @@ mod tests {
         assert!(find_bios(&d).unwrap_err().contains("no usable"));
         let mut swapped = synthetic_rom();
         bios::swap_words(&mut swapped);
-        std::fs::write(d.join("same_cdi/bios/CDI.ROM"), &swapped).unwrap();
-        assert_eq!(find_bios(&d).unwrap(), d.join("same_cdi/bios/CDI.ROM"));
+        std::fs::write(d.join("CDI.ROM"), &swapped).unwrap();
+        assert_eq!(find_bios(&d).unwrap(), d.join("CDI.ROM"));
         let mut m = Machine::new();
-        let r = m.load_bios(d.join("same_cdi/bios/CDI.ROM")).unwrap();
+        let r = m.load_bios(d.join("CDI.ROM")).unwrap();
         assert!(r.word_swapped);
         assert_eq!(m.bus.rom[..], synthetic_rom()[..]);
         let _ = std::fs::remove_dir_all(&d);
@@ -812,7 +811,7 @@ mod tests {
     fn find_dvc_fits_only_a_known_vmpega_dump() {
         let d = temp_dir("dvc");
         assert_eq!(find_dvc(&d), None);
-        std::fs::write(d.join("same_cdi/bios/VMPEGA.ROM"), &synthetic_rom()[..bios::DVC_ROM_SIZE]).unwrap();
+        std::fs::write(d.join("VMPEGA.ROM"), &synthetic_rom()[..bios::DVC_ROM_SIZE]).unwrap();
         assert_eq!(find_dvc(&d), None);
         let _ = std::fs::remove_dir_all(&d);
     }

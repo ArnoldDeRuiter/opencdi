@@ -19,7 +19,7 @@ impl Machine {
         Self { bus: CdiBus::new(), cpu: CpuCore::new(), instructions: 0, os9_trace: Os9Trace::from_env() }
     }
 
-    /// Reads and checks a system ROM file or MAME-style zip; the name is the zip entry used, if any.
+    /// Reads and checks a system ROM file or zip; the name is the zip entry used, if any.
     pub fn read_bios<P: AsRef<Path>>(path: P) -> std::io::Result<(Option<String>, BiosImage)> {
         let data = std::fs::read(path)?;
         if bios::is_zip(&data) {

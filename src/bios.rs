@@ -71,7 +71,7 @@ use Board::*;
 use Kind::*;
 use Layout::*;
 
-/// Known images, in order of preference; hashes checked against local dumps where held.
+/// Known images, in order of preference.
 pub static KNOWN: &[KnownRom] = &[
     rom("cdi220b.rom", "Philips CD-i 220 F2", Mono1, System, SYSTEM_ROM_SIZE, 0x279683ca, "53360a1f21ddac952e95306ced64186a3fc0b93e", Cpu, true, ""),
     rom("cdi200.rom", "Magnavox CD-i 200", Mono1, System, SYSTEM_ROM_SIZE, 0x40c4e6b9, "d961de803c89b3d1902d656ceb9ce7c02dccb40a", Cpu, true, ""),
@@ -213,7 +213,7 @@ pub fn sha1_hex(data: &[u8]) -> String {
     sha1(data).iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// Exchanges the two bytes of every 16-bit word (MAME's ROM_GROUPWORD | ROM_REVERSE layout and back).
+/// Exchanges the two bytes of every 16-bit word (and back).
 pub fn swap_words(data: &mut [u8]) {
     for w in data.chunks_exact_mut(2) {
         w.swap(0, 1);
@@ -328,7 +328,7 @@ pub fn inspect(mut data: Vec<u8>) -> BiosImage {
             msg += &format!(": {}", k.note);
             Status::Warning
         } else if swap {
-            msg += ": word-swapped dump (MAME layout), byte order fixed";
+            msg += ": word-swapped dump, byte order fixed";
             Status::Fixed
         } else {
             msg += ": known good dump";
@@ -412,7 +412,7 @@ pub fn inspect_dvc(data: Vec<u8>) -> BiosImage {
     done(data, Status::Warning, None, msg)
 }
 
-/// Checks every 256 KB entry of a zip (MAME `cdimono1.zip` carries `vmpega.rom`) and returns the best one with its entry name.
+/// Checks every 256 KB entry of a zip (`cdimono1.zip` carries `vmpega.rom`) and returns the best one with its entry name.
 pub fn best_dvc_in_zip(zip: &[u8]) -> Result<(String, BiosImage), String> {
     let mut found = Vec::new();
     for e in zip_entries(zip)?.into_iter().filter(|e| e.size == DVC_ROM_SIZE) {
@@ -518,7 +518,7 @@ pub fn zip_entries(zip: &[u8]) -> Result<Vec<ZipEntry<'_>>, String> {
     Ok(out)
 }
 
-/// Checks every 512 KB entry of a zip (MAME `cdimono1.zip` style) and returns the best one with its entry name.
+/// Checks every 512 KB entry of a zip (`cdimono1.zip` style) and returns the best one with its entry name.
 pub fn best_in_zip(zip: &[u8]) -> Result<(String, BiosImage), String> {
     let mut found = Vec::new();
     let mut problems = Vec::new();
@@ -633,15 +633,15 @@ mod tests {
     #[test]
     fn swap_flag_follows_row_layout() {
         let cpu = synthetic();
-        let mut mame = synthetic();
-        swap_words(&mut mame);
+        let mut wswap = synthetic();
+        swap_words(&mut wswap);
         let cpu_row = leak_row(&cpu, Cpu, Mono1, true);
-        let mame_row = leak_row(&mame, WordSwapped, Mono4, true);
+        let swapped_row = leak_row(&wswap, WordSwapped, Mono4, true);
         let find = |row: &'static KnownRom, d: &[u8]| identify_in([row].into_iter(), d).map(|r| r.1);
         assert_eq!(find(cpu_row, &cpu), Some(false));
-        assert_eq!(find(cpu_row, &mame), Some(true));
-        assert_eq!(find(mame_row, &mame), Some(true));
-        assert_eq!(find(mame_row, &cpu), Some(false));
+        assert_eq!(find(cpu_row, &wswap), Some(true));
+        assert_eq!(find(swapped_row, &wswap), Some(true));
+        assert_eq!(find(swapped_row, &cpu), Some(false));
         assert_eq!(find(cpu_row, &vec![0u8; SYSTEM_ROM_SIZE]), None);
     }
 

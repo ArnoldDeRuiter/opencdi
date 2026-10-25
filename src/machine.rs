@@ -105,6 +105,10 @@ impl Machine {
 
                 line_cycles += batch_cycles;
                 bus.tick_timer(batch_cycles as u32);
+                if bus.slave.reset_request {
+                    bus.player_reset();
+                    cpu.reset(bus);
+                }
                 cpu.set_irq(highest_ipl(bus));
             }
 

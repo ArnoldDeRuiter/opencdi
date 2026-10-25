@@ -435,7 +435,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(n) = recent_pick {
         disc_arg = opencdi::frontend::recent_images().get(n.wrapping_sub(1)).map(|p| p.to_string_lossy().to_string());
         if disc_arg.is_none() {
-            warn!("No recent disc image number {} (see --recent)", n);
+            log::warn!("No recent disc image number {} (see --recent)", n);
         }
     }
     let initial_disc = disc_arg.filter(|_| !standalone).and_then(|a| {

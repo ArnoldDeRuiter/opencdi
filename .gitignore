@@ -14,3 +14,5 @@ Invia_a_GitHub.bat
 *.sv
 *.py
 *.png
+*.bin
+*.mon

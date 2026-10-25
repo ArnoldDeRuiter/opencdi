@@ -313,3 +313,57 @@ pub fn pop_action() -> Option<GuiAction> {
 pub fn push_action(action: GuiAction) {
     PENDING_ACTIONS.lock().unwrap().push(action);
 }
+
+pub const MAX_RECENT_IMAGES: usize = 10;
+const RECENT_FILE: &str = "opencdi_recent.txt";
+
+static RECENT_IMAGES: Mutex<Option<Vec<PathBuf>>> = Mutex::new(None);
+
+// Reads opencdi_recent.txt: one path per line, newest first, missing files skipped
+fn load_recent_images() -> Vec<PathBuf> {
+    let mut list: Vec<PathBuf> = Vec::new();
+    if let Ok(content) = std::fs::read_to_string(RECENT_FILE) {
+        for line in content.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let p = PathBuf::from(line);
+            if (p.exists() || crate::cdrom::parse_drive_letter(&p).is_some()) && !list.contains(&p) && list.len() < MAX_RECENT_IMAGES {
+                list.push(p);
+            }
+        }
+    }
+    list
+}
+
+fn save_recent_images(list: &[PathBuf]) {
+    let content: String = list.iter().take(MAX_RECENT_IMAGES).map(|p| format!("{}\n", p.to_string_lossy())).collect();
+    let _ = std::fs::write(RECENT_FILE, content);
+}
+
+/// The recent disc images, newest first (at most `MAX_RECENT_IMAGES`).
+pub fn recent_images() -> Vec<PathBuf> {
+    RECENT_IMAGES.lock().unwrap().get_or_insert_with(load_recent_images).clone()
+}
+
+/// Moves `path` to the front of the recent list and saves it.
+pub fn add_recent_image(path: &std::path::Path) {
+    let mut guard = RECENT_IMAGES.lock().unwrap();
+    let list = guard.get_or_insert_with(load_recent_images);
+    // Stored absolute so the list works from any working directory; drive letters stay as given
+    let p = if crate::cdrom::parse_drive_letter(path).is_some() { path.to_path_buf() } else { std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()) };
+    list.retain(|x| x != &p);
+    list.insert(0, p);
+    list.truncate(MAX_RECENT_IMAGES);
+    save_recent_images(list);
+}
+
+pub fn clear_recent_images() {
+    *RECENT_IMAGES.lock().unwrap() = Some(Vec::new());
+    save_recent_images(&[]);
+}
+
+/// Window title for a loaded disc: the image name, or the drive for a physical disc.
+pub fn disc_display_name(path: &std::path::Path) -> String {
+    match crate::cdrom::parse_drive_letter(path) {
+        Some(letter) => format!("Real Optical CD Drive ({}:)", letter),
+        None => path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "CD-i Disc".to_string()),
+    }
+}

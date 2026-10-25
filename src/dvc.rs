@@ -599,6 +599,8 @@ impl Dvc {
         self.decoder_timecode = 0;
         self.display_frame_counter = 0;
         self.decoder_frame_counter = 0;
+        self.has_valid_frame = false;
+        self.framebuffer.fill(0xFF00_0000);
     }
 
     pub fn reset_regs(&mut self) {
@@ -970,6 +972,14 @@ impl Dvc {
                     self.decoder_enabled = true;
                     self.frames_presented_count = 0;
                     self.underflow_count = 0;
+                    self.display_frame_counter = 0;
+                    self.decoder_frame_counter = 0;
+                    self.display_timecode = 0;
+                    self.decoder_timecode = 0;
+                    self.set_fmv_word(0x58, 0);
+                    self.set_fmv_word(0x5A, 0);
+                    self.set_fmv_word(0x08, 0);
+                    self.set_fmv_word(0x0A, 0);
                     if self.video_decoder.as_ref().map_or(true, |d| d.is_buffer_empty()) {
                         self.video_decoder = None;
                     }
@@ -983,6 +993,7 @@ impl Dvc {
                     self.or_fmv_word(FMV_ISR, FMV_IRQ_PAI);
                 }
                 if value & 0x0080 != 0 { // STOP
+                    // NOTE: Real DVC hardware keeps the last decoded picture in DRAM.
                     self.video_armed = false;
                     self.video_playing = false;
                     self.decoder_enabled = false;
@@ -991,6 +1002,14 @@ impl Dvc {
                     self.frames_presented_count = 0;
                     self.frames_decoded_count = 0;
                     self.frame_accum = 0.0;
+                    self.display_frame_counter = 0;
+                    self.decoder_frame_counter = 0;
+                    self.display_timecode = 0;
+                    self.decoder_timecode = 0;
+                    self.set_fmv_word(0x58, 0);
+                    self.set_fmv_word(0x5A, 0);
+                    self.set_fmv_word(0x08, 0);
+                    self.set_fmv_word(0x0A, 0);
                     self.dvc_stream_fifo.clear();
                     self.demux.clear();
                     self.set_fmv_word(0x5C, 0x0000);
@@ -1005,6 +1024,7 @@ impl Dvc {
                     self.decoder_enabled = true;
                 }
                 if value & 0x2000 != 0 { // DEC_OFF
+                    // NOTE: Real DVC hardware keeps the last decoded picture in DRAM.
                     self.decoder_enabled = false;
                     self.video_playing = false;
                     self.underflow_count = 0;
@@ -1102,14 +1122,31 @@ impl Dvc {
             }
         }
 
-        // Process video stream
-        if !self.demux.video.is_empty() {
-            let video_data = std::mem::take(&mut self.demux.video);
+        // Process video stream (drain from both FMV demux and FMA demux)
+        let mut video_data = std::mem::take(&mut self.demux.video);
+        if !self.fma_demux.video.is_empty() {
+            if video_data.is_empty() {
+                video_data = std::mem::take(&mut self.fma_demux.video);
+            } else {
+                video_data.extend(self.fma_demux.video.drain(..));
+            }
+        }
+        if !video_data.is_empty() {
             if self.video_decoder.is_none() {
                 trace!(">>> [DVC] INITIALIZING VIDEO DECODER WITH FIRST PACKET (len={})", video_data.len());
                 self.video_decoder = Some(Video::new(video_data));
             } else {
                 self.video_decoder.as_mut().unwrap().append(&video_data);
+            }
+            if let Some(ref mut dec) = self.video_decoder {
+                if dec.has_header() {
+                    let w = dec.width() as u16;
+                    let h = dec.height() as u16;
+                    if w > 0 && h > 0 {
+                        self.set_fmv_word(0x52, w);
+                        self.set_fmv_word(0x54, h);
+                    }
+                }
             }
         }
 
@@ -1146,10 +1183,17 @@ impl Dvc {
         let total_min = total_sec / 60;
         let minutes = total_min % 60;
         let hours = (total_min / 60) % 24;
-        self.display_timecode = ((hours & 0x1F) << 22) | ((minutes & 0x3F) << 16) | ((seconds & 0x3F) << 6) | (pictures & 0x3F);
+        let sec_pic = (((seconds & 0x3F) << 6) | (pictures & 0x3F)) as u16;
+        let hr_min = (((hours & 0x1F) << 6) | (minutes & 0x3F)) as u16;
+        self.display_timecode = ((hr_min as u32) << 16) | (sec_pic as u32);
 
-        self.set_fmv_word(0x58, (self.display_timecode >> 16) as u16); // word 0x2C
-        self.set_fmv_word(0x5A, self.display_timecode as u16);          // word 0x2D
+        // CL450 register 0x58 = Seconds/Pictures, 0x5A = Hours/Minutes
+        // vmpega.rom driver routine 0xE5429E unpacks (MOVE.L (A3), D0):
+        //   D0 high word (0x58) -> Seconds (bits 6..11) and Pictures (bits 0..5)
+        //   D0 low word (0x5A)  -> Hours (bits 6..10) and Minutes (bits 0..5)
+        // returning (Hours << 24) | (Minutes << 16) | (Seconds << 8) | Pictures.
+        self.set_fmv_word(0x58, sec_pic); // word 0x2C
+        self.set_fmv_word(0x5A, hr_min);  // word 0x2D
     }
 
     pub fn advance_decoder_timecode(&mut self) {
@@ -1161,10 +1205,13 @@ impl Dvc {
         let total_min = total_sec / 60;
         let minutes = total_min % 60;
         let hours = (total_min / 60) % 24;
-        self.decoder_timecode = ((hours & 0x1F) << 22) | ((minutes & 0x3F) << 16) | ((seconds & 0x3F) << 6) | (pictures & 0x3F);
+        let sec_pic = (((seconds & 0x3F) << 6) | (pictures & 0x3F)) as u16;
+        let hr_min = (((hours & 0x1F) << 6) | (minutes & 0x3F)) as u16;
+        self.decoder_timecode = ((hr_min as u32) << 16) | (sec_pic as u32);
 
-        self.set_fmv_word(0x08, (self.decoder_timecode >> 16) as u16); // word 0x04
-        self.set_fmv_word(0x0A, self.decoder_timecode as u16);          // word 0x05
+        // CL450 register 0x08 = Seconds/Pictures, 0x0A = Hours/Minutes
+        self.set_fmv_word(0x08, sec_pic); // word 0x04
+        self.set_fmv_word(0x0A, hr_min);  // word 0x05
     }
 
     // Input holds no whole MP2 frame and all decoded audio has been played.
@@ -1236,12 +1283,16 @@ impl Dvc {
             let mut decoded_w = 0;
             let mut decoded_h = 0;
             let mut got_frame = false;
-            let mut sequence_start = false;
+            let mut gop_seen = false;
+            let mut seq_seen = false;
+            let mut gop_tc = None;
             if let Some(ref mut decoder) = self.video_decoder {
                 if let Some(frame_idx) = decoder.decode() {
-                    sequence_start = decoder.take_sequence_start();
                     self.frames_decoded_count += 1;
                     self.frames_presented_count += 1;
+                    gop_seen = decoder.take_gop_seen();
+                    seq_seen = decoder.take_sequence_seen();
+                    gop_tc = decoder.take_gop_timecode();
                     if self.frames_decoded_count % 30 == 1 {
                         trace!(">>> [DVC] DECODED MPEG FRAME #{} (idx={})", self.frames_decoded_count, frame_idx);
                     }
@@ -1260,25 +1311,44 @@ impl Dvc {
             if got_frame {
                 self.underflow_count = 0;
                 // Update frame geometry & timing registers
-                self.set_fmv_word(0x02, decoded_w as u16);
-                self.set_fmv_word(0x04, decoded_h as u16);
                 self.set_fmv_word(0x52, decoded_w as u16);
                 self.set_fmv_word(0x54, decoded_h as u16);
                 self.set_fmv_word(0x06, 0x23);  // PRPA
                 self.set_fmv_word(0x56, 1800);  // Frame rate ratio
 
-                // Advance timecodes
-                self.advance_display_timecode();
-                self.advance_decoder_timecode();
+                // Synchronize with embedded MPEG-1 GOP timecode if present, otherwise advance by 1 frame
+                if let Some(tc) = gop_tc {
+                    let fps = if self.fps > 0.0 { self.fps.round() as u32 } else { 25 };
+                    let pictures = tc & 0x3F;
+                    let seconds = (tc >> 6) & 0x3F;
+                    let minutes = (tc >> 16) & 0x3F;
+                    let hours = (tc >> 22) & 0x1F;
+                    let frame_count = ((hours * 3600 + minutes * 60 + seconds) * fps) + pictures;
+                    self.display_frame_counter = frame_count;
+                    self.decoder_frame_counter = frame_count;
+                    self.display_timecode = tc;
+                    self.decoder_timecode = tc;
+                    let sec_pic = (tc & 0xFFFF) as u16;
+                    let hr_min = (tc >> 16) as u16;
+                    self.set_fmv_word(0x58, sec_pic);
+                    self.set_fmv_word(0x5A, hr_min);
+                    self.set_fmv_word(0x08, sec_pic);
+                    self.set_fmv_word(0x0A, hr_min);
+                } else {
+                    self.advance_display_timecode();
+                    self.advance_decoder_timecode();
+                }
 
                 // Display status: active picture
                 self.set_fmv_word(0x5C, 0x0001);
 
                 // Set FMV ISR bits
                 self.or_fmv_word(FMV_ISR, FMV_IRQ_PIC);
-                // First picture of a play, and the first after each sequence header in the stream.
-                if self.frames_presented_count == 1 || sequence_start {
-                    self.or_fmv_word(FMV_ISR, FMV_IRQ_SEQ | FMV_IRQ_GOP);
+                if gop_seen || self.frames_presented_count == 1 {
+                    self.or_fmv_word(FMV_ISR, FMV_IRQ_GOP);
+                }
+                if seq_seen || self.frames_presented_count == 1 {
+                    self.or_fmv_word(FMV_ISR, FMV_IRQ_SEQ);
                 }
             } else if self.frames_decoded_count > 0 && (self.video_playing || self.video_armed) {
                 let sequence_ended = self
@@ -1287,37 +1357,33 @@ impl Dvc {
                     .map_or(false, |d| d.take_sequence_end());
                 let buffer_drained = self.dvc_stream_fifo.is_empty()
                     && self.demux.video.is_empty()
+                    && self.fma_stream_fifo.is_empty()
+                    && self.fma_demux.video.is_empty()
                     && self.video_decoder.as_ref().map_or(true, |d| d.is_buffer_empty());
 
                 self.underflow_count = self.underflow_count.saturating_add(1);
 
-                if sequence_ended || (buffer_drained && self.underflow_count >= 15) {
-                    trace!(">>> [DVC] END OF SEQUENCE / DRAIN after {} frames (seq_end={}, underflow={})", self.frames_decoded_count, sequence_ended, self.underflow_count);
-                    self.or_fmv_word(FMV_ISR, FMV_IRQ_EOD | FMV_IRQ_ESI | FMV_IRQ_NDAT);
+                if sequence_ended {
+                    trace!(">>> [DVC] END OF SEQUENCE (seq_end) after {} frames", self.frames_decoded_count);
+                    self.or_fmv_word(FMV_ISR, FMV_IRQ_EOD | FMV_IRQ_ESI);
                     if !self.fma_dma_seen {
                         self.or_fma_word(FMA_ISR, FMA_IRQ_EOI);
                     }
                     self.set_fmv_word(0x5C, 0x0000); // Return display status to idle
                     self.video_playing = false;
                     self.video_armed = false;
-                    self.decoder_enabled = false;
-                    self.underflow_count = 0;
-                    self.video_decoder = None;
-                    self.frames_presented_count = 0;
-                    self.frames_decoded_count = 0;
-                    self.frame_accum = 0.0;
-                    self.dvc_stream_fifo.clear();
-                    self.demux.clear();
-                    // NOTE: Real DVC hardware keeps the last decoded picture in DRAM.
-                    // MCD-212 plane transparency / ICM controls when it is visible.
-                } else {
+                } else if buffer_drained {
+                    // Real CL450 MPEG-1 decoder asserts FMV_IRQ_NDAT (Need Data) on underflow,
+                    // repeating the last frame in DRAM without stopping or destroying the decoder.
                     self.or_fmv_word(FMV_ISR, FMV_IRQ_NDAT);
                 }
             } else if (self.get_fmv_word(FMV_IER) & FMV_IRQ_NDAT) != 0
                 && self.dvc_stream_fifo.is_empty()
                 && self.demux.video.is_empty()
+                && self.fma_stream_fifo.is_empty()
+                && self.fma_demux.video.is_empty()
             {
-                self.or_fmv_word(FMV_ISR, FMV_IRQ_NDAT | FMV_IRQ_EOD | FMV_IRQ_ESI);
+                self.or_fmv_word(FMV_ISR, FMV_IRQ_NDAT);
             }
         }
     }

@@ -27,6 +27,8 @@ This document tracks the compatibility status, test results, and verified fixes 
 | 15 | `Mutant Rampage - Bodyslam (USA).chd` | **Yes** | **Bootable / Excellent** | Boot hang resolved with native PAL boot sequence for European BIOS; DVC detected; Start/Setup menus working. |
 | 16 | `Tangram - The Ultimate Chinese Game (Europe).chd` | No | *Pending testing* | Added to test suite, pending automated verification. |
 | 17 | `Ultra CD-i Soccer (Europe).chd` | **Yes** | **Bootable / Excellent** | DVC detected (missing cartridge warning resolved); title screen and pitch rendering functional. |
+| 18 | `Space Ace (USA).chd` | **Yes** | **Playable / Excellent** | Full-motion MPEG-1 video and audio fully functional; gameplay interactions verified. |
+| 19 | `Brain Dead 13 (USA) (Disc 1).chd` | **Yes** | **Intro Functional / Under Investigation** | Philips Media FMV bumper (`misc.rtf`) video and audio play smoothly; post-logo scene 1 preload under diagnosis. |
 
 ---
 

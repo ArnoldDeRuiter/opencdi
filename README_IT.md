@@ -144,6 +144,27 @@ Tutti i contributi sono i benvenuti:
 
 ---
 
+## Riconoscimenti e Licenze di Terze Parti (Acknowledgments & Third-Party Licenses)
+
+Questo progetto beneficia profondamente del lavoro pionieristico, della documentazione e della dedizione della comunità di preservazione digitale:
+
+### MAME (MAMEDev)
+Un ringraziamento e riconoscimento speciale va al **team di sviluppo di MAME e a tutti i suoi collaboratori** (tra cui Harmony, Ryan Holtz, Pete Bernert e gli autori del driver CD-i). Parte della ricerca architetturale sui registri, sul comportamento dei sottosistemi CD-i e sui timing hardware in OpenCDi trae prezioso riferimento dai driver Philips CD-i di MAME, distribuiti sotto licenza **BSD 3-Clause**:
+- `src/mame/philips/cdi.cpp`
+- `src/mame/philips/mcd212.cpp`
+- `src/mame/philips/cdicdic.cpp`
+- `src/devices/cpu/m68000/scc68070.cpp` (e `scc68070.cpp`)
+
+*MAME è distribuito secondo i termini della GNU General Public License v2 o successive (GPL-2.0+), con i singoli file driver rilasciati sotto licenze permissive tra cui BSD-3-Clause. Copyright © 1997-2026 MAMEDev e collaboratori.*
+
+### CDi_MiSTer
+Un ringraziamento speciale agli autori e collaboratori del progetto **CDi_MiSTer** (incluso ash2020 e la community di MiSTer FPGA). La loro ricerca hardware a livello FPGA, il reverse-engineering degli ASIC proprietari del CD-i, l'analisi dei cicli di bus e la documentazione tecnica sono stati determinanti per verificare i comportamenti low-level dell'hardware reale del CD-i.
+
+### La Community di Preservazione CD-i
+Un caloroso ringraziamento all'intera community CD-i per il continuo impegno nella conservazione, nel testing e nella documentazione della libreria hardware e software CD-i.
+
+---
+
 ## Licenza
 
 Distribuito sotto licenza **MIT**. Consulta il file `LICENSE` per i dettagli.

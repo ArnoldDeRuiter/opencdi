@@ -83,6 +83,7 @@ Usage: opencdi [options] [disc image (cue, chd, iso, bin)]
   --rom <path>        System BIOS (default: search bios/, the current and the program directory)
   --frames <n>        Quit after n emulated frames
   --mouse             Start in mouse mode (host mouse drives the CD-i pointer)
+  --recent [n]        List the recent disc images, or boot recent image number n
   --no-host-input     Ignore host keyboard, mouse and gamepads; never grab the cursor
   --bios, --standalone  Boot the BIOS shell without a disc
   --dvc <path>        Digital Video Cartridge ROM (default: search dvc/, bios/, the current and the program directory)
@@ -303,11 +304,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let has_flag = |f: &str| args.iter().any(|a| a == f);
     let help = has_flag("--help") || has_flag("-h");
     #[cfg(target_os = "windows")]
-    if help || has_flag("--console") {
+    if help || has_flag("--console") || has_flag("--recent") {
         attach_console();
     }
     if help {
         print!("{}", USAGE);
+        return Ok(());
+    }
+    // --recent alone lists the recent disc images; --recent <n> boots number n
+    let recent_pick: Option<usize> = args.iter().position(|a| a == "--recent").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok());
+    if has_flag("--recent") && recent_pick.is_none() {
+        let list = opencdi::frontend::recent_images();
+        if list.is_empty() {
+            println!("No recent disc images");
+        }
+        for (i, p) in list.iter().enumerate() {
+            println!("{:2}  {}", i + 1, p.display());
+        }
         return Ok(());
     }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -412,27 +425,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut disc_arg = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--rom" || a == "--frames" || a == "--dvc" {
+        if a == "--rom" || a == "--frames" || a == "--dvc" || (a == "--recent" && recent_pick.is_some()) {
             it.next();
         } else if !a.starts_with("--") {
             disc_arg = Some(a.clone());
             break;
         }
     }
+    if let Some(n) = recent_pick {
+        disc_arg = opencdi::frontend::recent_images().get(n.wrapping_sub(1)).map(|p| p.to_string_lossy().to_string());
+        if disc_arg.is_none() {
+            warn!("No recent disc image number {} (see --recent)", n);
+        }
+    }
     let initial_disc = disc_arg.filter(|_| !standalone).and_then(|a| {
         find_file(&a).or_else(|| {
             let p = PathBuf::from(&a);
-            if p.exists() { Some(p) } else { None }
+            if p.exists() || opencdi::cdrom::parse_drive_letter(&p).is_some() { Some(p) } else { None }
         })
     });
 
     if let Some(p) = initial_disc {
         match m.bus.load_cdrom(&p) {
             Ok(_) => {
-                current_game_name = p
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "CD-i Disc".to_string());
+                opencdi::frontend::add_recent_image(&p);
+                current_game_name = opencdi::frontend::disc_display_name(&p);
                 info!("Loaded game disc at startup: {}", current_game_name);
 
                 let name_upper = current_game_name.to_uppercase();
@@ -551,6 +568,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // Letterbox rectangle (x, y, w, h) of the CD-i picture in a dst_w x dst_h surface, as minifb's AspectRatioStretch computes it
+// Application icon from icon.ico (the 64x64 PNG entry), as on the Windows executable
+fn window_icon() -> Option<winit::window::Icon> {
+    let ico: &[u8] = include_bytes!("../icon.ico");
+    let count = u16::from_le_bytes([*ico.get(4)?, *ico.get(5)?]) as usize;
+    let entry = (0..count).map(|i| &ico[6 + i * 16..22 + i * 16]).find(|e| e[0] == 64)?;
+    let size = u32::from_le_bytes(entry[8..12].try_into().ok()?) as usize;
+    let offset = u32::from_le_bytes(entry[12..16].try_into().ok()?) as usize;
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(ico.get(offset..offset + size)?));
+    decoder.set_transformations(png::Transformations::normalize_to_color8() | png::Transformations::ALPHA);
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut buf).ok()?;
+    if info.color_type != png::ColorType::Rgba {
+        return None;
+    }
+    buf.truncate(info.buffer_size());
+    winit::window::Icon::from_rgba(buf, info.width, info.height).ok()
+}
+
 fn image_rect(dst_w: usize, dst_h: usize) -> (usize, usize, usize, usize) {
     if dst_w == 0 || dst_h == 0 {
         return (0, 0, 0, 0);
@@ -737,13 +773,20 @@ impl App {
         }
     }
 
+    fn add_recent(&self, path: &Path) {
+        #[cfg(target_os = "windows")]
+        gui::add_recent_image(path);
+        #[cfg(not(target_os = "windows"))]
+        opencdi::frontend::add_recent_image(path);
+    }
+
     fn open_dialog_action(&self, open_and_reset: bool) {
         #[cfg(target_os = "windows")]
         gui::post_menu_command(self.hwnd(), if open_and_reset { gui::ID_FILE_OPEN } else { gui::ID_FILE_INSERT });
         #[cfg(not(target_os = "windows"))]
         {
             let _ = open_and_reset;
-            info!("No file dialog on this platform: pass the disc path on the command line");
+            info!("No file dialog on this platform: pass the disc path on the command line, or --recent <n>");
         }
     }
 
@@ -844,14 +887,14 @@ impl App {
                     info!("Hot-swapping disc into CD-i drive: {:?}", path);
                     match self.m.bus.change_disc(&path) {
                         Ok(_) => {
-                            self.current_game_name = path
-                                .file_stem()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "CD-i Disc".to_string());
+                            self.current_game_name = opencdi::frontend::disc_display_name(&path);
+                            self.add_recent(&path);
                             info!("New disc inserted successfully: {}", self.current_game_name);
                         }
                         Err(e) => {
                             error!("Failed to hot-swap disc {:?}: {:?}", path, e);
+                            #[cfg(target_os = "windows")]
+                            gui::show_disc_error(self.hwnd(), &format!("Errore nell'inserimento del disco:\n\n{}", e));
                         }
                     }
                 }
@@ -859,10 +902,8 @@ impl App {
                     info!("Loading and booting new disc (Reset): {:?}", path);
                     match self.m.bus.load_cdrom(&path) {
                         Ok(_) => {
-                            self.current_game_name = path
-                                .file_stem()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "CD-i Disc".to_string());
+                            self.current_game_name = opencdi::frontend::disc_display_name(&path);
+                            self.add_recent(&path);
                             info!("Disc loaded successfully: {}", self.current_game_name);
 
                             if !self.dvc_disabled && !self.m.bus.dvc.is_fitted() {
@@ -898,6 +939,8 @@ impl App {
                         }
                         Err(e) => {
                             error!("Failed to load disc {:?}: {:?}", path, e);
+                            #[cfg(target_os = "windows")]
+                            gui::show_disc_error(self.hwnd(), &format!("Errore nel caricamento del disco:\n\n{}", e));
                         }
                     }
                 }
@@ -1442,7 +1485,8 @@ impl ApplicationHandler for App {
         let attrs = Window::default_attributes()
             .with_title("OpenCDi - Philips CD-i")
             .with_inner_size(LogicalSize::new(SCREEN_WIDTH as f64, SCREEN_HEIGHT as f64))
-            .with_resizable(true);
+            .with_resizable(true)
+            .with_window_icon(window_icon());
         let window = match el.create_window(attrs) {
             Ok(w) => Rc::new(w),
             Err(e) => {

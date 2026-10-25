@@ -18,6 +18,7 @@ const START_PICTURE: i32 = 0x00;
 const START_EXTENSION: i32 = 0xB5;
 const START_USER_DATA: i32 = 0xB2;
 const SEQUENCE_HEADER_MAX_BITS: usize = 64 + 2 * 64 * 8;
+const START_GOP: i32 = 0xB8;
 
 fn is_slice_start_code(c: i32) -> bool {
     (START_SLICE_FIRST..=START_SLICE_LAST).contains(&c)
@@ -758,8 +759,9 @@ pub struct Video {
     /// Set when an MPEG-1 sequence_end_code (00 00 01 B7) has been received
     /// and not yet reported to the host.
     sequence_end_seen: bool,
-    // Set on each parsed sequence header; the host takes it with the next picture.
-    sequence_start_seen: bool,
+    pub sequence_header_seen: bool,
+    pub gop_header_seen: bool,
+    pub last_gop_timecode: Option<u32>,
 }
 
 impl Video {
@@ -805,7 +807,9 @@ impl Video {
             has_reference_frame: false,
             assume_no_b_frames: false,
             sequence_end_seen: false,
-            sequence_start_seen: false,
+            sequence_header_seen: false,
+            gop_header_seen: false,
+            last_gop_timecode: None,
         };
         s.sequence_end_seen = s.buffer.contains_start_code_from(0, 0xB7);
         s.start_code = s.buffer.find_start_code(START_SEQUENCE);
@@ -821,9 +825,16 @@ impl Video {
         std::mem::replace(&mut self.sequence_end_seen, false)
     }
 
-    /// Returns true once per sequence header parsed since the last call.
-    pub fn take_sequence_start(&mut self) -> bool {
-        std::mem::replace(&mut self.sequence_start_seen, false)
+    pub fn take_gop_seen(&mut self) -> bool {
+        std::mem::replace(&mut self.gop_header_seen, false)
+    }
+
+    pub fn take_sequence_seen(&mut self) -> bool {
+        std::mem::replace(&mut self.sequence_header_seen, false)
+    }
+
+    pub fn take_gop_timecode(&mut self) -> Option<u32> {
+        self.last_gop_timecode.take()
     }
 
     pub fn is_buffer_empty(&self) -> bool {
@@ -898,6 +909,12 @@ impl Video {
                         return Some(self.emit(self.bwd));
                     }
                     self.decode_sequence_header();
+                } else if self.start_code == START_GOP {
+                    if !self.buffer.has(27) {
+                        return None;
+                    }
+                    self.gop_header_seen = true;
+                    self.decode_gop_header();
                 }
                 self.start_code = self.buffer.next_start_code();
             }
@@ -962,6 +979,22 @@ impl Video {
         w != 0 && h != 0 && (w != self.width || h != self.height)
     }
 
+    fn decode_gop_header(&mut self) {
+        if self.buffer.has(27) {
+            let _drop_frame = self.buffer.read(1);
+            let hours = self.buffer.read(5);
+            let minutes = self.buffer.read(6);
+            let _marker = self.buffer.read(1);
+            let seconds = self.buffer.read(6);
+            let pictures = self.buffer.read(6);
+            let _closed_gop = self.buffer.read(1);
+            let _broken_link = self.buffer.read(1);
+            let sec_pic = ((seconds & 0x3F) << 6) | (pictures & 0x3F);
+            let hr_min = ((hours & 0x1F) << 6) | (minutes & 0x3F);
+            self.last_gop_timecode = Some((hr_min << 16) | sec_pic);
+        }
+    }
+
     fn decode_sequence_header(&mut self) -> bool {
         if !self.buffer.has(SEQUENCE_HEADER_MAX_BITS) {
             return false;
@@ -1012,7 +1045,7 @@ impl Video {
 
         // Header handled; a repeat of the same size keeps the reference pictures.
         self.start_code = -1;
-        self.sequence_start_seen = true;
+        self.sequence_header_seen = true;
         if self.has_sequence_header && self.frames.first().map_or(false, |f| f.width == self.width && f.height == self.height) {
             return true;
         }
@@ -1048,12 +1081,12 @@ impl Video {
             cr: Plane {
                 width: self.chroma_width,
                 height: self.chroma_height,
-                data: vec![0; chroma],
+                data: vec![128; chroma],
             },
             cb: Plane {
                 width: self.chroma_width,
                 height: self.chroma_height,
-                data: vec![0; chroma],
+                data: vec![128; chroma],
             },
         }
     }
@@ -1564,8 +1597,10 @@ fn process_macroblock(
         + (mb_col * block_size) as i64
         + hp as i64;
     let di0 = ((mb_row * dw + mb_col) * block_size) as i64;
-    let max_address = (dw * (mb_height * block_size - block_size + 1) - block_size) as i64;
-    if si0 < 0 || si0 > max_address || di0 < 0 || di0 > max_address {
+    // Half-pel neighbours are clamped below, so only the full-pel block must fit.
+    let needed_si_max = si0 + ((block_size - 1) * dw + block_size - 1) as i64;
+    let needed_di_max = di0 + ((block_size - 1) * dw + block_size) as i64;
+    if si0 < 0 || needed_si_max >= s.len() as i64 || di0 < 0 || needed_di_max > d.len() as i64 {
         return; // corrupt video
     }
 
@@ -1744,10 +1779,10 @@ mod edge_mc_tests {
         es.extend(std::iter::repeat(0).take(16));
         let mut v = Video::new(es);
         assert_eq!(v.width(), 32);
-        assert!(v.take_sequence_start() && !v.take_sequence_start());
+        assert!(v.take_sequence_seen() && !v.take_sequence_seen());
         v.decode();
         assert_eq!((v.width(), v.frame(0).y.width), (48, 48));
-        assert!(v.take_sequence_start());
+        assert!(v.take_sequence_seen());
     }
 
     #[test]
@@ -1779,5 +1814,6 @@ opencdi::impl_state!(Video {
     start_code, picture_type, motion_forward, motion_backward, has_sequence_header,
     quantizer_scale, slice_begin, macroblock_address, mb_row, mb_col, macroblock_type, macroblock_intra,
     dc_predictor, frames, cur, fwd, bwd, block_data, intra_quant_matrix, non_intra_quant_matrix,
-    has_reference_frame, assume_no_b_frames, sequence_end_seen, sequence_start_seen,
+    has_reference_frame, assume_no_b_frames, sequence_end_seen, sequence_header_seen,
+    gop_header_seen, last_gop_timecode,
 } skip {});

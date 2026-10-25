@@ -328,10 +328,12 @@ impl CdiBus {
             return;
         }
 
-        if fma_req {
-            self.dvc.transfer_for_fma = true;
+        if self.dvc.dma_requested {
+            // transfer_for_fma was already correctly set by handle_fmv_write or handle_fma_write
         } else if fmv_req {
             self.dvc.transfer_for_fma = false;
+        } else if fma_req {
+            self.dvc.transfer_for_fma = true;
         }
 
         self.dvc.dma_requested = false;

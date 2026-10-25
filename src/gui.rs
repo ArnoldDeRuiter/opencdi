@@ -12,6 +12,9 @@ pub const ID_FILE_RESET: usize = 1002;
 pub const ID_FILE_EJECT: usize = 1004;
 pub const ID_FILE_EXIT: usize = 1003;
 
+pub const ID_PHYSICAL_DRIVE_BOOT_BASE: usize = 1100;
+pub const ID_PHYSICAL_DRIVE_SWAP_BASE: usize = 1130;
+
 pub const ID_PROFILE_STANDARD: usize = 1010;
 pub const ID_PROFILE_WASD: usize = 1011;
 pub const ID_PROFILE_NUMPAD: usize = 1012;
@@ -37,13 +40,19 @@ pub const ID_EMU_DVC: usize = 1051;
 pub const ID_HELP_CONTROLS: usize = 1040;
 pub const ID_HELP_ABOUT: usize = 1041;
 
+pub const ID_RECENT_IMAGE_BASE: usize = 1200;
+pub const ID_RECENT_CLEAR: usize = 1210;
+pub use crate::frontend::MAX_RECENT_IMAGES;
+
 // Win32 Constants
 const MF_STRING: u32 = 0x0000_0000;
 const MF_POPUP: u32 = 0x0000_0010;
 const MF_SEPARATOR: u32 = 0x0000_0800;
 const MF_BYCOMMAND: u32 = 0x0000_0000;
+const MF_BYPOSITION: u32 = 0x0000_0400;
 const MF_CHECKED: u32 = 0x0000_0008;
 const MF_UNCHECKED: u32 = 0x0000_0000;
+const MF_GRAYED: u32 = 0x0000_0001;
 
 const WM_COMMAND: u32 = 0x0111;
 const WM_TIMER: u32 = 0x0113;
@@ -54,6 +63,12 @@ const WM_EXITSIZEMOVE: u32 = 0x0232;
 const RDW_INTERNALPAINT: u32 = 0x0002;
 const MODAL_TIMER_ID: usize = 0x0CD1;
 const MODAL_TIMER_MS: u32 = 10;
+const WM_SETICON: u32 = 0x0080;
+const ICON_SMALL: usize = 0;
+const ICON_BIG: usize = 1;
+const IMAGE_ICON: u32 = 1;
+const LR_LOADFROMFILE: u32 = 0x0000_0010;
+const LR_SHARED: u32 = 0x0000_8000;
 const GWLP_WNDPROC: i32 = -4;
 
 const MB_OK: u32 = 0x0000_0000;
@@ -61,6 +76,7 @@ const MB_YESNO: u32 = 0x0000_0004;
 const MB_YESNOCANCEL: u32 = 0x0000_0003;
 const MB_ICONINFORMATION: u32 = 0x0000_0040;
 const MB_ICONQUESTION: u32 = 0x0000_0020;
+const MB_ICONWARNING: u32 = 0x0000_0030;
 const IDYES: i32 = 6;
 const IDNO: i32 = 7;
 
@@ -108,6 +124,10 @@ unsafe extern "system" {
     fn KillTimer(hwnd: *mut std::ffi::c_void, id: usize) -> i32;
     fn RedrawWindow(hwnd: *mut std::ffi::c_void, rect: *const std::ffi::c_void, region: *mut std::ffi::c_void, flags: u32) -> i32;
     fn EndMenu() -> i32;
+    fn SendMessageW(hwnd: *mut std::ffi::c_void, msg: u32, wparam: usize, lparam: isize) -> isize;
+    fn LoadImageW(hinst: *mut std::ffi::c_void, name: *const u16, utype: u32, cx: i32, cy: i32, fu_load: u32) -> *mut std::ffi::c_void;
+    fn DeleteMenu(hmenu: *mut std::ffi::c_void, uposition: u32, uflags: u32) -> i32;
+    fn GetMenuItemCount(hmenu: *mut std::ffi::c_void) -> i32;
 }
 
 #[link(name = "comdlg32")]
@@ -115,13 +135,107 @@ unsafe extern "system" {
     fn GetOpenFileNameW(lpofn: *mut OPENFILENAMEW) -> i32;
 }
 
-fn to_wide(s: &str) -> Vec<u16> {
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetLogicalDrives() -> u32;
+    fn GetDriveTypeW(lpRootPathName: *const u16) -> u32;
+    fn GetModuleHandleW(lpmodulename: *const u16) -> *mut std::ffi::c_void;
+}
+
+pub fn to_wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+}
+
+pub fn get_optical_drives() -> Vec<char> {
+    let mut drives = Vec::new();
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let mask = GetLogicalDrives();
+        for i in 0..26 {
+            if (mask & (1 << i)) != 0 {
+                let letter = (b'A' + i as u8) as char;
+                let root = format!("{}:\\", letter);
+                let wide_root = to_wide(&root);
+                if GetDriveTypeW(wide_root.as_ptr()) == 5 { // 5 = DRIVE_CDROM
+                    drives.push(letter);
+                }
+            }
+        }
+    }
+    drives
+}
+
+// Records an opened image and refreshes the Recent Disc Images menu
+pub fn add_recent_image(path: &std::path::Path) {
+    crate::frontend::add_recent_image(path);
+    refresh_recent_menu();
+}
+
+pub fn refresh_recent_menu() {
+    unsafe {
+        if !RECENT_MENU_HANDLE.is_null() {
+            rebuild_recent_menu_items(RECENT_MENU_HANDLE);
+            if !OWNER_HWND.is_null() {
+                DrawMenuBar(OWNER_HWND);
+            }
+        }
+    }
+}
+
+pub fn set_window_icon(hwnd: *mut std::ffi::c_void) {
+    if hwnd.is_null() { return; }
+    unsafe {
+        let hinstance = GetModuleHandleW(std::ptr::null());
+        // Load embedded resource icon (ID 1 compiled by winres)
+        let mut hicon_big = LoadImageW(hinstance, 1 as *const u16, IMAGE_ICON, 32, 32, LR_SHARED);
+        let mut hicon_small = LoadImageW(hinstance, 1 as *const u16, IMAGE_ICON, 16, 16, LR_SHARED);
+
+        // Fallback to loading icon.ico from current directory if needed
+        if (hicon_big.is_null() || hicon_small.is_null()) && std::path::Path::new("icon.ico").exists() {
+            let wide_ico = to_wide("icon.ico");
+            if hicon_big.is_null() {
+                hicon_big = LoadImageW(std::ptr::null_mut(), wide_ico.as_ptr(), IMAGE_ICON, 32, 32, LR_LOADFROMFILE | LR_SHARED);
+            }
+            if hicon_small.is_null() {
+                hicon_small = LoadImageW(std::ptr::null_mut(), wide_ico.as_ptr(), IMAGE_ICON, 16, 16, LR_LOADFROMFILE | LR_SHARED);
+            }
+        }
+
+        if !hicon_big.is_null() {
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_big as isize);
+        }
+        if !hicon_small.is_null() {
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon_small as isize);
+        }
+    }
 }
 
 static mut PREV_WNDPROC: isize = 0;
 static mut MENU_HANDLE: *mut std::ffi::c_void = std::ptr::null_mut();
 static mut OWNER_HWND: *mut std::ffi::c_void = std::ptr::null_mut();
+static mut RECENT_MENU_HANDLE: *mut std::ffi::c_void = std::ptr::null_mut();
+
+pub fn rebuild_recent_menu_items(menu: *mut std::ffi::c_void) {
+    if menu.is_null() { return; }
+    unsafe {
+        let count = GetMenuItemCount(menu);
+        for _ in 0..count {
+            DeleteMenu(menu, 0, MF_BYPOSITION);
+        }
+        let list = crate::frontend::recent_images();
+        if list.is_empty() {
+            AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, to_wide("(No recent disc images)").as_ptr());
+        } else {
+            for (i, p) in list.iter().enumerate().take(MAX_RECENT_IMAGES) {
+                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string_lossy().to_string());
+                let label = format!("&{} {}", (i + 1) % 10, name);
+                AppendMenuW(menu, MF_STRING, ID_RECENT_IMAGE_BASE + i, to_wide(&label).as_ptr());
+            }
+            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+            AppendMenuW(menu, MF_STRING, ID_RECENT_CLEAR, to_wide("Clear Recent Images History").as_ptr());
+        }
+    }
+}
 
 // --run-in-menu: menus, dialogs and move/size loops block winit's loop, so a timer drives emulation through WM_PAINT
 static RUN_IN_MODAL: AtomicBool = AtomicBool::new(false);
@@ -294,6 +408,29 @@ unsafe extern "system" fn custom_wndproc(
     }
     if msg == WM_COMMAND {
         let menu_id = (wparam & 0xFFFF) as usize;
+        if menu_id >= ID_PHYSICAL_DRIVE_BOOT_BASE && menu_id < ID_PHYSICAL_DRIVE_BOOT_BASE + 26 {
+            let letter = (b'A' + (menu_id - ID_PHYSICAL_DRIVE_BOOT_BASE) as u8) as char;
+            push_action(GuiAction::OpenDisc(PathBuf::from(format!("{}:", letter))));
+            return 0;
+        }
+        if menu_id >= ID_PHYSICAL_DRIVE_SWAP_BASE && menu_id < ID_PHYSICAL_DRIVE_SWAP_BASE + 26 {
+            let letter = (b'A' + (menu_id - ID_PHYSICAL_DRIVE_SWAP_BASE) as u8) as char;
+            push_action(GuiAction::InsertDisc(PathBuf::from(format!("{}:", letter))));
+            return 0;
+        }
+        if menu_id >= ID_RECENT_IMAGE_BASE && menu_id < ID_RECENT_IMAGE_BASE + MAX_RECENT_IMAGES {
+            let idx = menu_id - ID_RECENT_IMAGE_BASE;
+            let list = crate::frontend::recent_images();
+            if let Some(path) = list.get(idx) {
+                push_action(GuiAction::OpenDisc(path.clone()));
+            }
+            return 0;
+        }
+        if menu_id == ID_RECENT_CLEAR {
+            crate::frontend::clear_recent_images();
+            refresh_recent_menu();
+            return 0;
+        }
         match menu_id {
             ID_FILE_INSERT => {
                 if let Some(path) = modal(hwnd, || open_file_dialog(hwnd)) {
@@ -447,9 +584,49 @@ pub fn attach_gui_menu(
 
         // 1. File Menu
         let file_menu = CreatePopupMenu();
-        AppendMenuW(file_menu, MF_STRING, ID_FILE_INSERT, to_wide("Insert Disc (Hot-swap)...\tCtrl+I").as_ptr());
-        AppendMenuW(file_menu, MF_STRING, ID_FILE_OPEN, to_wide("Open Disc && Restart Console...\tCtrl+O").as_ptr());
+        AppendMenuW(file_menu, MF_STRING, ID_FILE_INSERT, to_wide("Insert Disc Image (Hot-swap)...\tCtrl+I").as_ptr());
+        AppendMenuW(file_menu, MF_STRING, ID_FILE_OPEN, to_wide("Open Disc Image && Restart Console...\tCtrl+O").as_ptr());
+
+        // Submenu: Recent Disc Images
+        let recent_menu = CreatePopupMenu();
+        RECENT_MENU_HANDLE = recent_menu;
+        rebuild_recent_menu_items(recent_menu);
+        AppendMenuW(file_menu, MF_POPUP, recent_menu as usize, to_wide("Recent Disc Images").as_ptr());
+
         AppendMenuW(file_menu, MF_STRING, ID_FILE_EJECT, to_wide("Eject Disc").as_ptr());
+
+        let optical_drives = get_optical_drives();
+        if !optical_drives.is_empty() {
+            AppendMenuW(file_menu, MF_SEPARATOR, 0, std::ptr::null());
+            let drives_submenu = CreatePopupMenu();
+            for &letter in &optical_drives {
+                let boot_id = ID_PHYSICAL_DRIVE_BOOT_BASE + (letter as usize - 'A' as usize);
+                let swap_id = ID_PHYSICAL_DRIVE_SWAP_BASE + (letter as usize - 'A' as usize);
+
+                let single_drive_menu = CreatePopupMenu();
+                AppendMenuW(
+                    single_drive_menu,
+                    MF_STRING,
+                    boot_id,
+                    to_wide(&format!("Boot Real Disc ({}:) & Restart", letter)).as_ptr(),
+                );
+                AppendMenuW(
+                    single_drive_menu,
+                    MF_STRING,
+                    swap_id,
+                    to_wide(&format!("Hot-swap Real Disc ({}:)", letter)).as_ptr(),
+                );
+
+                AppendMenuW(
+                    drives_submenu,
+                    MF_POPUP,
+                    single_drive_menu as usize,
+                    to_wide(&format!("Optical Drive ({}:)", letter)).as_ptr(),
+                );
+            }
+            AppendMenuW(file_menu, MF_POPUP, drives_submenu as usize, to_wide("Real Optical CD Drives").as_ptr());
+        }
+
         AppendMenuW(file_menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(file_menu, MF_STRING, ID_FILE_RESET, to_wide("Restart Console (Reset)\tF5 / H").as_ptr());
         AppendMenuW(file_menu, MF_SEPARATOR, 0, std::ptr::null());
@@ -504,6 +681,7 @@ pub fn attach_gui_menu(
 
         SetMenu(hwnd, main_menu);
         DrawMenuBar(hwnd);
+        set_window_icon(hwnd);
 
         update_input_device_menu(current_device_mode);
         update_profile_menu(current_profile);
@@ -596,10 +774,19 @@ pub fn show_controls_dialog(owner: *mut std::ffi::c_void) {
     }
 }
 
+// Warning box for a disc image or drive that failed to load
+pub fn show_disc_error(owner: *mut std::ffi::c_void, text: &str) {
+    let text = to_wide(text);
+    let title = to_wide("OpenCDi - Errore Lettura Disco");
+    modal(owner, || unsafe {
+        MessageBoxW(owner, text.as_ptr(), title.as_ptr(), MB_OK | MB_ICONWARNING);
+    });
+}
+
 pub fn show_about_dialog(owner: *mut std::ffi::c_void) {
     let text = to_wide(
         "OpenCDi - Philips CD-i Emulator\n\
-        Version: 0.1.6 (High Performance Edition)\n\
+        Version: 0.1.8 (High Performance Edition)\n\
         Built with Rust, winit & softbuffer\n\n\
         Key Emulation Features:\n\
         • Philips SCC68070 Microprocessor & OS-9 CD-RTOS kernel\n\
@@ -608,7 +795,11 @@ pub fn show_about_dialog(owner: *mut std::ffi::c_void) {
         • Motorola 68HC05 Slave Microcontroller (HLE keyboard, mouse, RTC, NVRAM)\n\
         • Digital Video Cartridge (DVC / MPEG-1) for Full Motion Video titles\n\
         • Win32 GUI menu with disc hot-swapping and configurable controls\n\
-        • Direct USB gamepad (XInput / DirectInput) and precise mouse capture"
+        • Direct USB gamepad (XInput / DirectInput) and precise mouse capture\n\n\
+        Special Thanks & Acknowledgements:\n\
+        • The MAME Team (BSD-3-Clause CD-i drivers: cdi, mcd212, cdicdic, scc68070)\n\
+        • The CDi_MiSTer project (ash2020) for FPGA hardware research\n\
+        • The CD-i preservation community"
     );
     let title = to_wide("About OpenCDi");
     unsafe {

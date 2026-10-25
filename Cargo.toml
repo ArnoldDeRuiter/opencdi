@@ -1,11 +1,11 @@
 [package]
 name = "opencdi"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 
 [features]
 default = ["host"]
-host = ["dep:winit", "dep:softbuffer", "dep:cpal", "dep:gilrs", "dep:env_logger"]
+host = ["dep:winit", "dep:softbuffer", "dep:cpal", "dep:gilrs", "dep:env_logger", "dep:png"]
 
 [workspace]
 members = ["crates/opencdi-libretro"]
@@ -51,11 +51,15 @@ gilrs = { version = "0.11.2", optional = true }
 log = "0.4.34"
 m68k = { version = "0.12.1", features = ["serde"] }
 oxideav-mp2 = "0.0.10"
+png = { version = "0.18", optional = true }
 softbuffer = { version = "0.4.8", optional = true, default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
 winit = { version = "0.30.13", optional = true }
 
 [patch.crates-io]
 m68k = { path = "crates/m68k" }
+
+[build-dependencies]
+winres = "0.1.12"
 
 # The libretro core relies on catch_unwind at every extern "C" entry; keep unwinding on.
 [profile.dev]

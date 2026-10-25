@@ -104,6 +104,18 @@ impl CdiBus {
         self.current_line_cycle = 0;
     }
 
+    /// Player reset from the slave: every device as at power-on, but RAM keeps its contents.
+    pub fn player_reset(&mut self) {
+        let planes = (self.mcd212.plane_a.clone(), self.mcd212.plane_b.clone());
+        let (cdic_ram, sys_ram) = (self.cdic.ram.clone(), self.sys_ram.clone());
+        let dvc_ram = (self.dvc.ram1.clone(), self.dvc.ram2.clone());
+        self.reset_system();
+        (self.mcd212.plane_a, self.mcd212.plane_b) = planes;
+        (self.cdic.ram, self.sys_ram) = (cdic_ram, sys_ram);
+        (self.dvc.ram1, self.dvc.ram2) = dvc_ram;
+        self.mcd212.plane_a[0..8].copy_from_slice(&self.rom[0..8]);
+    }
+
     #[inline(always)]
     pub fn add_ram_wait<const PATH: usize>(&mut self) {
         if self.emulate_wait_states {
@@ -263,7 +275,7 @@ impl CdiBus {
         if line >= vblank_lines && line < total_lines {
             let active_line = line - vblank_lines;
             if self.dvc.is_fitted() {
-                self.dvc.get_scanline(active_line, &mut self.mcd212.external_video_line);
+                self.dvc.get_scanline(active_line, &mut self.mcd212.external_video_line, &mut self.mcd212.external_video_present);
             }
         }
         if line == 0 {

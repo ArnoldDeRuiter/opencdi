@@ -1039,8 +1039,9 @@ pub fn show_about_dialog(owner: *mut std::ffi::c_void) {
         • Win32 GUI menu with disc hot-swapping and configurable controls\n\
         • Direct USB gamepad (XInput / DirectInput) and precise mouse capture\n\n\
         Special Thanks & Acknowledgements:\n\
-        • The MAME Team (MAMEDev) & contributors for their pioneering\n\
-          hardware research, documentation, and CD-i reference emulation."
+        • The MAME Team (BSD-3-Clause CD-i drivers: cdi, mcd212, cdicdic, scc68070)\n\
+        • The CDi_MiSTer project (ash2020) for FPGA hardware research\n\
+        • The CD-i preservation community"
     );
     let title = to_wide("About OpenCDi");
     unsafe {

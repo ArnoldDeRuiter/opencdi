@@ -148,10 +148,24 @@ All contributions are warmly welcome:
 
 ---
 
-## Acknowledgements & Special Thanks
+## Acknowledgments & Third-Party Licenses
 
-- **The MAME Team (MAMEDev):** Heartfelt thanks and credit to the MAME development team and contributors (including Harmony, Ryan Holtz, Pete Bernert, and the CD-i driver authors). Their pioneering hardware documentation, architectural research, and reference driver implementations for the Philips CD-i system (MCD-212 video display controller, CDIC CD-i controller, Motorola 68HC05 slave microcontroller, and DVC MPEG-1 cartridge) provided an invaluable foundation for digital preservation and for the development of OpenCDi.
-- **The CD-i Community:** For ongoing preservation efforts, testing, and documentation of the CD-i hardware and software library.
+This project benefits greatly from the prior work, documentation, and dedication of the digital preservation community:
+
+### MAME (MAMEDev)
+Special acknowledgment and credit to the **MAME development team and contributors** (including Harmony, Ryan Holtz, Pete Bernert, and the CD-i driver authors). Portions of the hardware register architecture, CD-i subsystem behavior, and hardware timing research in OpenCDi draw reference from MAME's Philips CD-i drivers, which are licensed under the **BSD 3-Clause License**:
+- `src/mame/philips/cdi.cpp`
+- `src/mame/philips/mcd212.cpp`
+- `src/mame/philips/cdicdic.cpp`
+- `src/devices/cpu/m68000/scc68070.cpp` (and `scc68070.cpp`)
+
+*MAME is distributed under the terms of the GNU General Public License v2 or later (GPL-2.0+), with individual driver files licensed under permissive terms such as BSD-3-Clause. Copyright © 1997-2026 MAMEDev and contributors.*
+
+### CDi_MiSTer
+Special thanks to the authors and contributors of the **CDi_MiSTer** project (including ash2020 and the MiSTer FPGA community). Their FPGA hardware research, reverse-engineering of CD-i ASICs, bus cycle analysis, and hardware documentation have been instrumental in verifying low-level behaviors of real CD-i hardware.
+
+### The CD-i Preservation Community
+Heartfelt thanks to the broader CD-i community for ongoing preservation efforts, testing, and documentation of the CD-i hardware and software library.
 
 ---
 

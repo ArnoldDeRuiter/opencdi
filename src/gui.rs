@@ -1037,7 +1037,10 @@ pub fn show_about_dialog(owner: *mut std::ffi::c_void) {
         • Motorola 68HC05 Slave Microcontroller (HLE keyboard, mouse, RTC, NVRAM)\n\
         • Digital Video Cartridge (DVC / MPEG-1) for Full Motion Video titles\n\
         • Win32 GUI menu with disc hot-swapping and configurable controls\n\
-        • Direct USB gamepad (XInput / DirectInput) and precise mouse capture"
+        • Direct USB gamepad (XInput / DirectInput) and precise mouse capture\n\n\
+        Special Thanks & Acknowledgements:\n\
+        • The MAME Team (MAMEDev) & contributors for their pioneering\n\
+          hardware research, documentation, and CD-i reference emulation."
     );
     let title = to_wide("About OpenCDi");
     unsafe {

@@ -148,6 +148,13 @@ All contributions are warmly welcome:
 
 ---
 
+## Acknowledgements & Special Thanks
+
+- **The MAME Team (MAMEDev):** Heartfelt thanks and credit to the MAME development team and contributors (including Harmony, Ryan Holtz, Pete Bernert, and the CD-i driver authors). Their pioneering hardware documentation, architectural research, and reference driver implementations for the Philips CD-i system (MCD-212 video display controller, CDIC CD-i controller, Motorola 68HC05 slave microcontroller, and DVC MPEG-1 cartridge) provided an invaluable foundation for digital preservation and for the development of OpenCDi.
+- **The CD-i Community:** For ongoing preservation efforts, testing, and documentation of the CD-i hardware and software library.
+
+---
+
 ## License
 
 Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for details.

@@ -144,6 +144,13 @@ Tutti i contributi sono i benvenuti:
 
 ---
 
+## Riconoscimenti & Ringraziamenti Speciali
+
+- **Il Team MAME (MAMEDev):** Un ringraziamento speciale e dovuto al team di sviluppo di MAME e a tutti i collaboratori (tra cui Harmony, Ryan Holtz, Pete Bernert e gli autori del driver CD-i). Il loro lavoro pionieristico nella documentazione dell'hardware, nella ricerca architetturale e nell'implementazione di riferimento dei componenti del Philips CD-i (controller video MCD-212, CDIC, microcontrollore slave 68HC05 e cartuccia DVC MPEG-1) ha costituito una base fondamentale e preziosissima per la preservazione digitale e per lo sviluppo di OpenCDi.
+- **La Community CD-i:** Per l'impegno costante nella conservazione, nel testing e nella documentazione della piattaforma Philips CD-i.
+
+---
+
 ## Licenza
 
 Distribuito sotto licenza **MIT**. Consulta il file `LICENSE` per i dettagli.

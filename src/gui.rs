@@ -39,15 +39,31 @@ pub const ID_EMU_DVC: usize = 1051;
 pub const ID_HELP_CONTROLS: usize = 1040;
 pub const ID_HELP_ABOUT: usize = 1041;
 
+pub const ID_RECENT_IMAGE_BASE: usize = 1200;
+pub const ID_RECENT_CLEAR: usize = 1210;
+pub const MAX_RECENT_IMAGES: usize = 10;
+const RECENT_FILE: &str = "opencdi_recent.txt";
+
+static RECENT_IMAGES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
 // Win32 Constants
 const MF_STRING: u32 = 0x0000_0000;
 const MF_POPUP: u32 = 0x0000_0010;
 const MF_SEPARATOR: u32 = 0x0000_0800;
 const MF_BYCOMMAND: u32 = 0x0000_0000;
+const MF_BYPOSITION: u32 = 0x0000_0400;
 const MF_CHECKED: u32 = 0x0000_0008;
 const MF_UNCHECKED: u32 = 0x0000_0000;
+const MF_GRAYED: u32 = 0x0000_0001;
 
 const WM_COMMAND: u32 = 0x0111;
+const WM_SETICON: u32 = 0x0080;
+const ICON_SMALL: usize = 0;
+const ICON_BIG: usize = 1;
+const IMAGE_ICON: u32 = 1;
+const LR_LOADFROMFILE: u32 = 0x0000_0010;
+const LR_SHARED: u32 = 0x0000_8000;
+
 const GWLP_WNDPROC: i32 = -4;
 
 const MB_OK: u32 = 0x0000_0000;
@@ -97,6 +113,10 @@ unsafe extern "system" {
     fn MessageBoxW(hwnd: *mut std::ffi::c_void, lptext: *const u16, lpcaption: *const u16, utype: u32) -> i32;
     fn SetWindowLongPtrW(hwnd: *mut std::ffi::c_void, nindex: i32, dwnewlong: isize) -> isize;
     fn CallWindowProcW(prev: isize, hwnd: *mut std::ffi::c_void, msg: u32, wparam: usize, lparam: isize) -> isize;
+    fn SendMessageW(hwnd: *mut std::ffi::c_void, msg: u32, wparam: usize, lparam: isize) -> isize;
+    fn LoadImageW(hinst: *mut std::ffi::c_void, name: *const u16, utype: u32, cx: i32, cy: i32, fu_load: u32) -> *mut std::ffi::c_void;
+    fn DeleteMenu(hmenu: *mut std::ffi::c_void, uposition: u32, uflags: u32) -> i32;
+    fn GetMenuItemCount(hmenu: *mut std::ffi::c_void) -> i32;
 }
 
 #[link(name = "comdlg32")]
@@ -108,6 +128,7 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn GetLogicalDrives() -> u32;
     fn GetDriveTypeW(lpRootPathName: *const u16) -> u32;
+    fn GetModuleHandleW(lpmodulename: *const u16) -> *mut std::ffi::c_void;
 }
 
 pub fn to_wide(s: &str) -> Vec<u16> {
@@ -131,6 +152,82 @@ pub fn get_optical_drives() -> Vec<char> {
         }
     }
     drives
+}
+
+pub fn load_recent_images() -> Vec<PathBuf> {
+    let mut list = Vec::new();
+    if let Ok(content) = std::fs::read_to_string(RECENT_FILE) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                let p = PathBuf::from(trimmed);
+                if p.exists() || crate::cdrom::parse_drive_letter(&p).is_some() {
+                    if !list.contains(&p) && list.len() < MAX_RECENT_IMAGES {
+                        list.push(p);
+                    }
+                }
+            }
+        }
+    }
+    list
+}
+
+pub fn save_recent_images(list: &[PathBuf]) {
+    let mut content = String::new();
+    for p in list.iter().take(MAX_RECENT_IMAGES) {
+        content.push_str(&p.to_string_lossy());
+        content.push('\n');
+    }
+    let _ = std::fs::write(RECENT_FILE, content);
+}
+
+pub fn add_recent_image(path: &std::path::Path) {
+    {
+        let mut list = RECENT_IMAGES.lock().unwrap();
+        let p = path.to_path_buf();
+        list.retain(|x| x != &p);
+        list.insert(0, p);
+        if list.len() > MAX_RECENT_IMAGES {
+            list.truncate(MAX_RECENT_IMAGES);
+        }
+        save_recent_images(&list);
+    }
+    unsafe {
+        if !RECENT_MENU_HANDLE.is_null() {
+            rebuild_recent_menu_items(RECENT_MENU_HANDLE);
+            if !OWNER_HWND.is_null() {
+                DrawMenuBar(OWNER_HWND);
+            }
+        }
+    }
+}
+
+pub fn set_window_icon(hwnd: *mut std::ffi::c_void) {
+    if hwnd.is_null() { return; }
+    unsafe {
+        let hinstance = GetModuleHandleW(std::ptr::null());
+        // Load embedded resource icon (ID 1 compiled by winres)
+        let mut hicon_big = LoadImageW(hinstance, 1 as *const u16, IMAGE_ICON, 32, 32, LR_SHARED);
+        let mut hicon_small = LoadImageW(hinstance, 1 as *const u16, IMAGE_ICON, 16, 16, LR_SHARED);
+
+        // Fallback to loading icon.ico from current directory if needed
+        if (hicon_big.is_null() || hicon_small.is_null()) && std::path::Path::new("icon.ico").exists() {
+            let wide_ico = to_wide("icon.ico");
+            if hicon_big.is_null() {
+                hicon_big = LoadImageW(std::ptr::null_mut(), wide_ico.as_ptr(), IMAGE_ICON, 32, 32, LR_LOADFROMFILE | LR_SHARED);
+            }
+            if hicon_small.is_null() {
+                hicon_small = LoadImageW(std::ptr::null_mut(), wide_ico.as_ptr(), IMAGE_ICON, 16, 16, LR_LOADFROMFILE | LR_SHARED);
+            }
+        }
+
+        if !hicon_big.is_null() {
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_big as isize);
+        }
+        if !hicon_small.is_null() {
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon_small as isize);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -415,6 +512,29 @@ static PENDING_ACTIONS: Mutex<Vec<GuiAction>> = Mutex::new(Vec::new());
 static mut PREV_WNDPROC: isize = 0;
 static mut MENU_HANDLE: *mut std::ffi::c_void = std::ptr::null_mut();
 static mut OWNER_HWND: *mut std::ffi::c_void = std::ptr::null_mut();
+static mut RECENT_MENU_HANDLE: *mut std::ffi::c_void = std::ptr::null_mut();
+
+pub fn rebuild_recent_menu_items(menu: *mut std::ffi::c_void) {
+    if menu.is_null() { return; }
+    unsafe {
+        let count = GetMenuItemCount(menu);
+        for _ in 0..count {
+            DeleteMenu(menu, 0, MF_BYPOSITION);
+        }
+        let list = RECENT_IMAGES.lock().unwrap();
+        if list.is_empty() {
+            AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, to_wide("(No recent disc images)").as_ptr());
+        } else {
+            for (i, p) in list.iter().enumerate().take(MAX_RECENT_IMAGES) {
+                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string_lossy().to_string());
+                let label = format!("&{} {}", (i + 1) % 10, name);
+                AppendMenuW(menu, MF_STRING, ID_RECENT_IMAGE_BASE + i, to_wide(&label).as_ptr());
+            }
+            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+            AppendMenuW(menu, MF_STRING, ID_RECENT_CLEAR, to_wide("Clear Recent Images History").as_ptr());
+        }
+    }
+}
 
 pub fn pop_action() -> Option<GuiAction> {
     let mut actions = PENDING_ACTIONS.lock().unwrap();
@@ -545,6 +665,30 @@ unsafe extern "system" fn custom_wndproc(
         if menu_id >= ID_PHYSICAL_DRIVE_SWAP_BASE && menu_id < ID_PHYSICAL_DRIVE_SWAP_BASE + 26 {
             let letter = (b'A' + (menu_id - ID_PHYSICAL_DRIVE_SWAP_BASE) as u8) as char;
             push_action(GuiAction::InsertDisc(PathBuf::from(format!("{}:", letter))));
+            return 0;
+        }
+        if menu_id >= ID_RECENT_IMAGE_BASE && menu_id < ID_RECENT_IMAGE_BASE + MAX_RECENT_IMAGES {
+            let idx = menu_id - ID_RECENT_IMAGE_BASE;
+            let list = RECENT_IMAGES.lock().unwrap();
+            if let Some(path) = list.get(idx) {
+                push_action(GuiAction::OpenDisc(path.clone()));
+            }
+            return 0;
+        }
+        if menu_id == ID_RECENT_CLEAR {
+            {
+                let mut list = RECENT_IMAGES.lock().unwrap();
+                list.clear();
+                save_recent_images(&list);
+            }
+            unsafe {
+                if !RECENT_MENU_HANDLE.is_null() {
+                    rebuild_recent_menu_items(RECENT_MENU_HANDLE);
+                    if !OWNER_HWND.is_null() {
+                        DrawMenuBar(OWNER_HWND);
+                    }
+                }
+            }
             return 0;
         }
         match menu_id {
@@ -693,6 +837,15 @@ pub fn attach_gui_menu(
         let file_menu = CreatePopupMenu();
         AppendMenuW(file_menu, MF_STRING, ID_FILE_INSERT, to_wide("Insert Disc Image (Hot-swap)...\tCtrl+I").as_ptr());
         AppendMenuW(file_menu, MF_STRING, ID_FILE_OPEN, to_wide("Open Disc Image & Restart Console...\tCtrl+O").as_ptr());
+
+        // Submenu: Recent Disc Images
+        let recent_menu = CreatePopupMenu();
+        RECENT_MENU_HANDLE = recent_menu;
+        let recents = load_recent_images();
+        *RECENT_IMAGES.lock().unwrap() = recents;
+        rebuild_recent_menu_items(recent_menu);
+        AppendMenuW(file_menu, MF_POPUP, recent_menu as usize, to_wide("Recent Disc Images").as_ptr());
+
         AppendMenuW(file_menu, MF_STRING, ID_FILE_EJECT, to_wide("Eject Disc").as_ptr());
 
         let optical_drives = get_optical_drives();
@@ -781,6 +934,7 @@ pub fn attach_gui_menu(
 
         SetMenu(hwnd, main_menu);
         DrawMenuBar(hwnd);
+        set_window_icon(hwnd);
 
         update_input_device_menu(current_device_mode);
         update_profile_menu(current_profile);

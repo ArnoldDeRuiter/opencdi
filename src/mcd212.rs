@@ -334,7 +334,7 @@ impl Mcd212 {
             0x02 => self.dcr[1],
             0x04 => self.vsr[1],
             0x08 => self.ddr[1],
-            0x0A => self.dca[1] as u16,
+            0x0A => self.dcp[1],
 
             0x10 => {
                 // CSR1 Read (Offset 0x11 / 0x10)
@@ -344,7 +344,7 @@ impl Mcd212 {
             0x12 => self.dcr[0],
             0x14 => self.vsr[0],
             0x18 => self.ddr[0],
-            0x1A => self.dca[0] as u16,
+            0x1A => self.dcp[0],
 
             _ => 0x0000,
         }
@@ -361,7 +361,10 @@ impl Mcd212 {
                 self.vsr[1] = val;
             }
             0x08 => self.ddr[1] = val,
-            0x0A => self.dca[1] = (self.dca[1] & 0xFFFF_0000) | (val as u32),
+            0x0A => {
+                self.dcp[1] = val;
+                self.dca[1] = (self.dca[1] & 0xFFFF_0000) | (val as u32);
+            }
 
             0x10 => self.csrw[0] = val,
             0x12 => {
@@ -369,7 +372,10 @@ impl Mcd212 {
             }
             0x14 => self.vsr[0] = val,
             0x18 => self.ddr[0] = val,
-            0x1A => self.dca[0] = (self.dca[0] & 0xFFFF_0000) | (val as u32),
+            0x1A => {
+                self.dcp[0] = val;
+                self.dca[0] = (self.dca[0] & 0xFFFF_0000) | (val as u32);
+            }
 
             _ => {}
         }
@@ -478,6 +484,9 @@ impl Mcd212 {
             }
             0xC0 => {
                 if PATH == 0 {
+                    if self.image_coding_method != val {
+                        println!(">>> [Scanline {}] ICMR changed from 0x{:08X} to 0x{:08X}", self.scanline, self.image_coding_method, val);
+                    }
                     self.image_coding_method = val;
                 }
             }
@@ -792,6 +801,7 @@ impl Mcd212 {
     }
 
     fn process_dca<const PATH: usize>(&mut self) {
+        let trace_this = false;
         let start_addr = ((self.dca[PATH] & 0x0007_FFFC) / 2) as usize;
         let mut addr = start_addr;
         let mut count = 0;
@@ -824,6 +834,9 @@ impl Mcd212 {
             addr += 2;
             count += 4;
 
+            if trace_this {
+                println!("  [Scanline {} DCA{} cmd] 0x{:08X}", self.scanline, PATH, cmd);
+            }
             match (cmd >> 24) as u8 {
                 0x00..=0x0F => processing = false, // STOP
                 0x10..=0x1F => {}                  // NOP

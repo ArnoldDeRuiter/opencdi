@@ -1,7 +1,9 @@
 use std::fs;
 
 fn main() {
-    let rom = fs::read("../file utili/bios/cdi220b.rom").expect("cdi220b.rom not found");
+    let rom = fs::read("file utili/bios/cdi220b.rom")
+        .or_else(|_| fs::read("../file utili/bios/cdi220b.rom"))
+        .expect("cdi220b.rom not found");
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "--find-target" {
         let target = u32::from_str_radix(args[2].trim_start_matches("0x").trim_start_matches("0X"), 16).unwrap();
@@ -63,8 +65,14 @@ fn main() {
 
     for (start, end, label) in ranges {
         println!("=== {} (0x{:06X} - 0x{:06X}) ===", label, start, end);
-        let (rom_data, base_addr) = if start >= 0xE00000 {
-            (fs::read("../file utili/dvc/vmpega.rom").expect("vmpega.rom not found"), 0xE40000u32)
+        let (rom_data, base_addr) = if start >= 0x07B000 && start < 0x080000 {
+            (fs::read("cdapdriv.bin").expect("cdapdriv.bin not found"), 0x07B530u32)
+        } else if start < 0x100000 {
+            (fs::read("../cdi_bd13.bin").or_else(|_| fs::read("cdi_bd13.bin")).expect("cdi_bd13.bin not found"), 0x0u32)
+        } else if start >= 0xDE0000 && start < 0xE00000 {
+            (fs::read("../cdi_bd13.bin").or_else(|_| fs::read("cdi_bd13.bin")).expect("cdi_bd13.bin not found"), 0xDE09D0u32)
+        } else if start >= 0xE00000 {
+            (fs::read("file utili/dvc/vmpega.rom").or_else(|_| fs::read("../file utili/dvc/vmpega.rom")).expect("vmpega.rom not found"), 0xE40000u32)
         } else {
             (rom.clone(), 0x400000u32)
         };

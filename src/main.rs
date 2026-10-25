@@ -341,6 +341,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(p) = initial_disc {
         match bus.load_cdrom(&p) {
             Ok(_) => {
+                #[cfg(target_os = "windows")]
+                crate::gui::add_recent_image(&p);
+
                 current_game_name = if let Some(drive_letter) = crate::cdrom::parse_drive_letter(&p) {
                     format!("Real Optical CD Drive ({}:)", drive_letter)
                 } else {
@@ -462,6 +465,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     info!("Hot-swapping disc into CD-i drive: {:?}", path);
                     match bus.change_disc(&path) {
                         Ok(_) => {
+                            #[cfg(target_os = "windows")]
+                            crate::gui::add_recent_image(&path);
                             current_game_name = if let Some(drive_letter) = crate::cdrom::parse_drive_letter(&path) {
                                 format!("Real Optical CD Drive ({}:)", drive_letter)
                             } else {
@@ -495,6 +500,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     info!("Loading and booting new disc (Reset): {:?}", path);
                     match bus.load_cdrom(&path) {
                         Ok(_) => {
+                            #[cfg(target_os = "windows")]
+                            crate::gui::add_recent_image(&path);
                             current_game_name = if let Some(drive_letter) = crate::cdrom::parse_drive_letter(&path) {
                                 format!("Real Optical CD Drive ({}:)", drive_letter)
                             } else {

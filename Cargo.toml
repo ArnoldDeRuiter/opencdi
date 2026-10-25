@@ -16,3 +16,6 @@ oxideav-mp2 = "0.0.10"
 
 [patch.crates-io]
 m68k = { path = "crates/m68k" }
+
+[build-dependencies]
+winres = "0.1.12"

@@ -23,7 +23,6 @@ pub enum DriveEvent {
     Stop,
 }
 
-#[derive(Default)]
 pub struct Ikat {
     pub mode: u8,
     pub imr: u8,
@@ -33,8 +32,27 @@ pub struct Ikat {
     pub disc_present: bool,
     pub status_polls: u8, // drive status polls answered since the disc appeared
     pub drive_event: Option<DriveEvent>,
+    pub pointer: (i32, i32, u8), // host pointer: x 0..767, y 0..559, buttons (1, 2, 4 = third button)
     pub loud: Loud,
     pub trace: bool,
+}
+
+impl Default for Ikat {
+    fn default() -> Self {
+        Self {
+            mode: 0,
+            imr: 0,
+            ports: Default::default(),
+            pointer_enabled: false,
+            pal: true,
+            disc_present: false,
+            status_polls: 0,
+            drive_event: None,
+            pointer: (384, 280, 0),
+            loud: Loud::default(),
+            trace: false,
+        }
+    }
 }
 
 /// Pending bit of a port in the pending and enable registers: A 0x02, B 0x08, C 0x20, D 0x80.
@@ -49,15 +67,41 @@ fn hex(b: &[u8]) -> String {
 
 impl Ikat {
     pub fn reset(&mut self) {
-        let (pal, trace, disc_present) = (self.pal, self.trace, self.disc_present);
+        let (pal, trace, disc_present, pointer) = (self.pal, self.trace, self.disc_present, self.pointer);
         let loud = std::mem::take(&mut self.loud);
-        *self = Self { pal, trace, disc_present, loud, ..Self::default() };
+        *self = Self { pal, trace, disc_present, pointer, loud, ..Self::default() };
     }
 
     /// Disc inserted or removed; the status replies restart their spin-up sequence.
     pub fn set_disc_present(&mut self, present: bool) {
         self.disc_present = present;
         self.status_polls = 0;
+    }
+
+    /// Host pointer position and buttons; reported on port B while pointer reports are enabled (enable bit 0x08).
+    pub fn update_pointer(&mut self, x: i32, y: i32, buttons: u8) {
+        let p = (x.clamp(0, 767), y.clamp(0, 559), buttons);
+        if p != self.pointer {
+            self.pointer = p;
+            if self.imr & pending_bit(1) != 0 {
+                self.send_pointer();
+            }
+        }
+    }
+
+    // Absolute report: x and y scaled to 0..1023; the third button also presses buttons 1 and 2.
+    fn send_pointer(&mut self) {
+        let (x, y, b) = self.pointer;
+        let (x, y) = ((x * 0x3FF / 0x2FF) as u16, (y * 0x3FF / 0x22F) as u16);
+        let third = b & 4 != 0;
+        let (b1, b2) = (b & 1 != 0 || third, b & 2 != 0 || third);
+        let r = [
+            0x40 | if b1 { 0x20 } else { 0 } | if b2 { 0x10 } else { 0 } | ((x >> 6) & 0x0F) as u8,
+            ((y >> 6) & 0x0F) as u8 | if third { 0x10 } else { 0 },
+            (x & 0x3F) as u8,
+            (y & 0x3F) as u8 | 0x80,
+        ];
+        self.respond(1, &r);
     }
 
     /// Ports holding an unread reply, as pending bits.
@@ -136,7 +180,11 @@ impl Ikat {
                 if self.trace {
                     eprintln!("IKAT ICTL <= {:02X} pc~{:06X}", value, pc);
                 }
+                let started = value & !self.imr & pending_bit(1) != 0;
                 self.imr = value;
+                if started {
+                    self.send_pointer();
+                }
                 self.trace_irq(irq);
             }
             REG_MODE => self.mode = value,
@@ -222,7 +270,7 @@ impl Ikat {
 }
 
 opencdi::impl_state!(Port { cmd, reply } skip {});
-opencdi::impl_state!(Ikat { mode, imr, ports, pointer_enabled, pal, disc_present, status_polls } skip { drive_event, loud, trace });
+opencdi::impl_state!(Ikat { mode, imr, ports, pointer_enabled, pal, disc_present, status_polls, pointer } skip { drive_event, loud, trace });
 
 #[cfg(test)]
 mod tests {
@@ -245,6 +293,17 @@ mod tests {
         assert_eq!(k.ports[0].cmd, [0x80, 0x4E]);
         k.write(0x01, 0x73, 0);
         assert!(k.ports[0].cmd.is_empty());
+    }
+
+    #[test]
+    fn pointer_report_on_enable_and_change() {
+        let mut k = Ikat { pointer: (384, 280, 0), ..Ikat::default() };
+        k.write(0x1B, 0x08, 0);
+        let r: Vec<u8> = (0..4).map(|_| k.read(0x0B, 0)).collect();
+        assert_eq!(r, [0x48, 0x08, 0x00, 0x80]);
+        k.update_pointer(767, 559, 4);
+        let r: Vec<u8> = (0..4).map(|_| k.read(0x0B, 0)).collect();
+        assert_eq!(r, [0x7F, 0x1F, 0x3F, 0xBF]);
     }
 
     #[test]

@@ -1423,8 +1423,8 @@ impl Dvc {
         for i in 0..6 {
             self.window[i] = self.get_fmv_word(FMV_SCRPOS_Y + i * 2);
         }
-        // Border components are studio-range levels (16 = black); expand like the MCD212 output does.
-        let level = |off: usize| ((((self.get_fmv_word(off) & 0xFF) as i32 - 16) * 298 + 128) >> 8).clamp(0, 255) as u32;
+        // Border components are studio-level (16 = black) and pass through unchanged.
+        let level = |off: usize| (self.get_fmv_word(off) & 0xFF) as u32;
         self.border_color = 0xFF00_0000 | (level(FMV_BORDER_R) << 16) | (level(FMV_BORDER_R + 2) << 8) | level(FMV_BORDER_R + 4);
     }
 

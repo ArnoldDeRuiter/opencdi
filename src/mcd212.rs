@@ -1164,9 +1164,8 @@ impl Mcd212 {
             let mixed_g = (weighted_a_g + weighted_b_g + 16).clamp(0, 255);
             let mixed_b = (weighted_a_b + weighted_b_b + 16).clamp(0, 255);
 
-            let out_r = (((mixed_r - 16) * 298 + 128) >> 8).clamp(0, 255) as u32;
-            let out_g = (((mixed_g - 16) * 298 + 128) >> 8).clamp(0, 255) as u32;
-            let out_b = (((mixed_b - 16) * 298 + 128) >> 8).clamp(0, 255) as u32;
+            // Output stays at studio level (black 16, white 235), no range expansion.
+            let (out_r, out_g, out_b) = (mixed_r as u32, mixed_g as u32, mixed_b as u32);
 
             out[x] = 0xFF00_0000 | (out_r << 16) | (out_g << 8) | out_b;
         }

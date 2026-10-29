@@ -1744,10 +1744,11 @@ impl Frame {
                 let cr = self.cr.data[ci] as i32 - 128;
                 let cb = self.cb.data[ci] as i32 - 128;
 
-                let yy = ((yv - 16) * 76309) >> 16;
-                let r = (cr * 104597) >> 16;
-                let g = (cb * 25674 + cr * 53278) >> 16;
-                let b = (cb * 132201) >> 16;
+                // Studio-level output: luma passes through with its pedestal, chroma scaled by 219/255.
+                let yy = yv;
+                let r = (cr * 89827 + 32768) >> 16;
+                let g = (cb * 22049 + cr * 45758 + 32768) >> 16;
+                let b = (cb * 113538 + 32768) >> 16;
 
                 let rr = clamp_u8(yy + r) as u32;
                 let gg = clamp_u8(yy - g) as u32;

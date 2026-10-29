@@ -141,9 +141,10 @@ unsafe extern "C" fn video_cb(data: *const c_void, width: c_uint, height: c_uint
         }
         h.video_all = all;
         h.video_last = v;
+        // A pixel counts as non-black when any channel is at least 0x20 (studio black is 16).
         h.nonblack = (0..height as usize)
             .map(|y| unsafe { std::slice::from_raw_parts((data as *const u8).add(y * pitch) as *const u32, width as usize) })
-            .map(|row| row.iter().filter(|&&p| p & 0x00FF_FFFF != 0).count())
+            .map(|row| row.iter().filter(|&&p| p & 0x00E0_E0E0 != 0).count())
             .sum();
         h.frames += 1;
     })

@@ -1,5 +1,5 @@
 use crate::bios::{self, BiosImage};
-use crate::bus::CdiBus;
+use crate::bus::{BoardKind, CdiBus};
 use crate::mcd212::VideoMode;
 use crate::os9_trace::Os9Trace;
 use crate::savestate::{self, Identity, Reader, State, StateError};
@@ -45,6 +45,7 @@ impl Machine {
     }
 
     pub fn load_bios_image(&mut self, img: &BiosImage) {
+        self.bus.set_board(if img.report.board == Some(bios::Board::Mono4) { BoardKind::Mono4 } else { BoardKind::Mono1 });
         let rom = &mut self.bus.rom;
         let len = img.data.len().min(rom.len());
         rom[..len].copy_from_slice(&img.data[..len]);

@@ -30,6 +30,7 @@ pub struct Mono4 {
     pub ikat: ikat::Ikat,
     pub nvram: nvram::Nvram32,
     pub unmapped: Loud,
+    pub unmapped_w: Loud,
 }
 
 impl Mono4 {
@@ -40,4 +41,4 @@ impl Mono4 {
     }
 }
 
-opencdi::impl_state!(Mono4 { ciap, ikat, nvram } skip { unmapped });
+opencdi::impl_state!(Mono4 { ciap, ikat, nvram } skip { unmapped, unmapped_w });

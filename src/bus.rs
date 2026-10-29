@@ -330,7 +330,10 @@ impl CdiBus {
                 let ext2 = if self.slave.irq_pending { 2 } else { 0 };
                 ext4.max(ext2)
             }
-            BoardKind::Mono4 => 0,
+            BoardKind::Mono4 => {
+                let m = self.mono4.as_deref();
+                if m.is_some_and(|m| m.ikat.irq()) { 2 } else { 0 }
+            }
         }
     }
 
@@ -1024,7 +1027,8 @@ impl CdiBus {
         self.counters.unmapped += 1;
         let pc = self.current_pc;
         if let Some(m) = self.mono4.as_deref_mut() {
-            if m.unmapped.first(addr) {
+            let loud = if kind.starts_with('W') { &mut m.unmapped_w } else { &mut m.unmapped };
+            if loud.first(addr) {
                 eprintln!("MONO4 unmapped {} {:06X} = {:02X} pc~{:06X}", kind, addr, value, pc);
             }
         }
@@ -1082,7 +1086,10 @@ impl CdiBus {
                 }
                 return;
             }
-            0x310000..=0x31FFFF if (addr & 1) == 1 => return m.ikat.write(addr - 0x310000, value, pc),
+            0x310000..=0x31FFFF if (addr & 1) == 1 => {
+                m.ikat.pal = self.mcd212.video_mode == crate::mcd212::VideoMode::Pal;
+                return m.ikat.write(addr - 0x310000, value, pc);
+            }
             0x320000..=0x32FFFF => {
                 if let Some(i) = opencdi::mono4::nvram::Nvram32::index(addr - 0x320000) {
                     m.nvram.ram[i] = value;
@@ -1115,8 +1122,11 @@ impl CdiBus {
     }
 
     // External level 4 (CIAP) and level 2 (IKAT) acknowledges on the Mono-IV board.
-    fn mono4_iack(&mut self, _level: u8) -> Option<u32> {
-        None
+    fn mono4_iack(&mut self, level: u8) -> Option<u32> {
+        match level {
+            2 => Some(0x1A),
+            _ => None,
+        }
     }
 
     fn iack(&mut self, level: u8) -> u32 {

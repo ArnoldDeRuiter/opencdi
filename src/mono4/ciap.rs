@@ -28,20 +28,37 @@ pub struct Ciap {
     pub regs: [u16; 64],
     pub running: bool,
     pub q_mode: bool,
+    pub lba: u32,
+    pub drive_active: bool,
+    pub seeks: u64,
     pub loud: Loud,
     pub trace: bool,
 }
 
 impl Default for Ciap {
     fn default() -> Self {
-        Self { ram: vec![0; WINDOW_SIZE], regs: [0; 64], running: false, q_mode: false, loud: Loud::default(), trace: false }
+        Self { ram: vec![0; WINDOW_SIZE], regs: [0; 64], running: false, q_mode: false, lba: 0, drive_active: false, seeks: 0, loud: Loud::default(), trace: false }
     }
 }
 
 impl Ciap {
     pub fn reset(&mut self) {
         self.regs = [0; 64];
-        (self.running, self.q_mode) = (false, false);
+        (self.running, self.q_mode, self.lba, self.drive_active) = (false, false, 0, false);
+    }
+
+    /// Drive request from IKAT port D: a seek positions the next sector and starts the drive, a stop halts delivery.
+    pub fn drive(&mut self, ev: super::ikat::DriveEvent) {
+        match ev {
+            super::ikat::DriveEvent::Seek(lba) => {
+                (self.lba, self.drive_active) = (lba, true);
+                self.seeks += 1;
+            }
+            super::ikat::DriveEvent::Stop => self.drive_active = false,
+        }
+        if self.trace {
+            eprintln!("CIAP DRIVE {:?}", ev);
+        }
     }
 
     /// True when a window offset falls on the register block.
@@ -158,7 +175,7 @@ impl Ciap {
     }
 }
 
-opencdi::impl_state!(Ciap { ram, regs, running, q_mode } skip { loud, trace });
+opencdi::impl_state!(Ciap { ram, regs, running, q_mode, lba, drive_active } skip { seeks, loud, trace });
 
 #[cfg(test)]
 mod tests {

@@ -122,6 +122,7 @@ impl CdiBus {
     pub fn reset_system(&mut self) {
         if let Some(m) = self.mono4.as_deref_mut() {
             m.reset();
+            m.ikat.set_disc_present(self.cdrom.is_some());
         }
         self.mcd212.reset();
         self.mcd212.plane_a[0..8].copy_from_slice(&self.rom[0..8]);
@@ -243,6 +244,9 @@ impl CdiBus {
         let cd = CdRom::open(path)?;
         self.cdrom = Some(cd);
         self.slave.set_disc_inserted(true);
+        if let Some(m) = self.mono4.as_deref_mut() {
+            m.ikat.set_disc_present(true);
+        }
         Ok(())
     }
 
@@ -253,6 +257,10 @@ impl CdiBus {
         self.cdic.command = 0;
         self.cdic.disc_command = 0;
         self.slave.notify_disc_swapped();
+        if let Some(m) = self.mono4.as_deref_mut() {
+            m.ikat.set_disc_present(true);
+            m.ciap.drive_active = false;
+        }
         Ok(())
     }
 
@@ -1090,7 +1098,11 @@ impl CdiBus {
             }
             0x310000..=0x31FFFF if (addr & 1) == 1 => {
                 m.ikat.pal = self.mcd212.video_mode == crate::mcd212::VideoMode::Pal;
-                return m.ikat.write(addr - 0x310000, value, pc);
+                m.ikat.write(addr - 0x310000, value, pc);
+                if let Some(ev) = m.ikat.drive_event.take() {
+                    m.ciap.drive(ev);
+                }
+                return;
             }
             0x320000..=0x32FFFF => {
                 if let Some(i) = opencdi::mono4::nvram::Nvram32::index(addr - 0x320000) {

@@ -1168,6 +1168,11 @@ impl CdiBus {
 
     fn mono4_rd8(&mut self, addr: u32) -> u8 {
         if self.dvc.is_fitted() && Self::cartridge_address(addr) {
+            // A hole in the cartridge window reads open bus and is reported once.
+            if !crate::dvc::Dvc::impeg_mapped(addr) {
+                self.mono4_unmapped("R8", addr, 0xFF);
+                return 0xFF;
+            }
             return self.mono1_rd8(addr);
         }
         let pc = self.current_pc;
@@ -1194,6 +1199,11 @@ impl CdiBus {
 
     fn mono4_rd16(&mut self, address: u32, addr: u32) -> u16 {
         if self.dvc.is_fitted() && Self::cartridge_address(addr) {
+            // A hole in the cartridge window reads open bus and is reported once.
+            if !crate::dvc::Dvc::impeg_mapped(addr) {
+                self.mono4_unmapped("R16", addr, 0xFF);
+                return 0xFFFF;
+            }
             return self.mono1_rd16(address, addr);
         }
         if let (0x300000..=0x303FFE, Some(m)) = (addr, self.mono4.as_deref_mut()) {
@@ -1213,6 +1223,11 @@ impl CdiBus {
 
     fn mono4_wr8(&mut self, addr: u32, value: u8) {
         if self.dvc.is_fitted() && Self::cartridge_address(addr) {
+            // A hole in the cartridge window reads open bus and is reported once.
+            if !crate::dvc::Dvc::impeg_mapped(addr) {
+                self.mono4_unmapped("W8", addr, value as u32);
+                return ();
+            }
             return self.mono1_wr8(addr, value);
         }
         let pc = self.current_pc;
@@ -1252,6 +1267,11 @@ impl CdiBus {
 
     fn mono4_wr16(&mut self, address: u32, addr: u32, value: u16) {
         if self.dvc.is_fitted() && Self::cartridge_address(addr) {
+            // A hole in the cartridge window reads open bus and is reported once.
+            if !crate::dvc::Dvc::impeg_mapped(addr) {
+                self.mono4_unmapped("W16", addr, value as u32);
+                return ();
+            }
             return self.mono1_wr16(address, addr, value);
         }
         if let (0x300000..=0x303FFE, Some(m)) = (addr, self.mono4.as_deref_mut()) {
@@ -1496,6 +1516,34 @@ mod tests {
         assert!(bus.try_read_word(0x500000).is_err() && bus.try_read_word(0x800000).is_err());
         assert!(bus.try_read_word(0x320011).is_ok() && bus.try_read_byte(0x8000_2011).is_ok());
         assert_eq!(bus.counters.bus_errors, 2);
+    }
+
+    #[test]
+    fn mono4_cartridge_window_and_interrupt_priority() {
+        let mut bus = CdiBus::new();
+        bus.set_board(BoardKind::Mono4);
+        bus.mono4_bus_errors = true;
+        assert!(bus.try_read_word(0xE40000).is_err());
+        bus.dvc.load_rom_bytes(&[0x4A, 0xFC, 0, 0]);
+        bus.dvc.impeg = true;
+        assert_eq!(bus.try_read_word(0xE40000), Ok(0x4AFC));
+        // A hole inside the window reads open bus without a bus error and is counted.
+        let n = bus.counters.unmapped;
+        assert_eq!(bus.try_read_byte(0xE03001), Ok(0xFF));
+        assert_eq!(bus.counters.unmapped, n + 1);
+        // Nothing pending: no vector from the cartridge or the CIAP.
+        assert_eq!(bus.mono4_iack(4), None);
+        bus.dvc.set_fmv_word(crate::dvc::FMV_IVEC, 0x5A << 3 | 4);
+        bus.dvc.set_fmv_word(crate::dvc::FMV_IER, 0x0001);
+        bus.dvc.set_fmv_word(crate::dvc::FMV_ISR, 0x0001);
+        if let Some(m) = bus.mono4.as_deref_mut() {
+            m.ciap.write_reg(ciap::REG_IER, 0x0001, 0);
+            m.ciap.regs[(ciap::REG_ISR >> 1) as usize] = 0x0001;
+        }
+        assert_eq!(bus.board_ipl(), 4);
+        assert_eq!(bus.mono4_iack(4), Some(0x5A));
+        bus.dvc.set_fmv_word(crate::dvc::FMV_ISR, 0);
+        assert_eq!(bus.mono4_iack(4), Some(0x3C));
     }
 
     #[test]

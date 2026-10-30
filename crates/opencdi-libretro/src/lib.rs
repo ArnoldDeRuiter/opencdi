@@ -258,7 +258,6 @@ fn option_value(key: &CStr) -> Option<String> {
     (ok && !v.value.is_null()).then(|| unsafe { CStr::from_ptr(v.value) }.to_string_lossy().into_owned())
 }
 
-// Checks cartridge candidates in order and logs each verdict; only a known VMPEG dump is fitted.
 // The IMPEG cartridge for the 490 board; only the known dump is fitted.
 fn find_impeg(dir: &Path) -> Option<PathBuf> {
     for p in candidates(dir, IMPEG_NAMES) {
@@ -271,10 +270,14 @@ fn find_impeg(dir: &Path) -> Option<PathBuf> {
             Err(e) => log(RETRO_LOG_WARN, &format!("IMPEG {}: {}", p.display(), e)),
         }
     }
+    if !candidates(dir, DVC_NAMES).is_empty() {
+        log(RETRO_LOG_WARN, "a VMPEG cartridge ROM is present but does not fit the CD-i 490; it needs impega.rom");
+    }
     log(RETRO_LOG_INFO, "no IMPEG cartridge ROM (impega.rom); Digital Video titles will ask for the cartridge");
     None
 }
 
+// Checks cartridge candidates in order and logs each verdict; only a known VMPEG dump is fitted.
 fn find_dvc(dir: &Path) -> Option<PathBuf> {
     let candidates = candidates(dir, DVC_NAMES);
     if candidates.is_empty() {

@@ -389,8 +389,10 @@ pub fn inspect_impeg(data: Vec<u8>) -> BiosImage {
     let sha = sha1_hex(&data);
     let (status, known, msg) = match identify(&data) {
         Some((k, false)) if k.kind == Dvc && k.board == Mono4 => (Status::Ok, Some(k), format!("{}, {}: known good dump", k.model, k.file)),
+        Some((k, true)) if k.kind == Dvc && k.board == Mono4 => (Status::Error, Some(k), format!("{} ({}): word-swapped dump; use the dump in CPU byte order", k.model, k.file)),
         Some((k, _)) if k.kind == Dvc => (Status::Error, Some(k), format!("{} ({}): only the IMPEG cartridge fits the Mono-IV board", k.model, k.file)),
         Some((k, _)) => (Status::Error, Some(k), format!("this is the {} ROM, not a cartridge ROM", k.model)),
+        None if data.len() == DVC_ROM_SIZE && data.starts_with(&[0x4A, 0xFC]) => (Status::Error, None, format!("unknown cartridge image (SHA-1 {}): an IMPEG ROM that differs from the known dump is not fitted", sha)),
         None => (Status::Error, None, "unknown cartridge image: only the known IMPEG dump fits the Mono-IV board".into()),
     };
     let board = (status == Status::Ok).then_some(Mono4);

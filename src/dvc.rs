@@ -405,8 +405,10 @@ pub struct Dvc {
     pub fmv_regs: Box<[u8; 256]>,
     pub impeg: bool, // IMPEG cartridge on the Mono-IV board: extra register windows below
     pub impeg_regs: Vec<u8>, // 0xE04100-0xE043FF on IMPEG (data port and audio block)
-    pub impeg_fw: Vec<u8>, // 0xE04800-0xE07FFF on IMPEG: firmware windows, plain RAM, never run
+    pub impeg_fw: Vec<u8>, // 0xE04800-0xE07FFF on IMPEG: firmware windows, plain RAM, never run (not saved: nothing reads it back)
     pub impeg_pio: bool, // IMPEG audio fed by programmed I/O
+    pub impeg_hi_valid: bool, // the high byte of the next data-port word has been written
+    pub impeg_ivec_zero_logged: bool,
 
     // Mirrored fields for easy access
     pub fma_cmd: u16,
@@ -492,6 +494,8 @@ impl Dvc {
             impeg_regs: vec![0; 0x300],
             impeg_fw: vec![0; 0x3800],
             impeg_pio: false,
+            impeg_hi_valid: false,
+            impeg_ivec_zero_logged: false,
 
             fma_cmd: 0,
             fma_isr: 0,
@@ -569,6 +573,9 @@ impl Dvc {
 
         self.reset_stream();
         self.reset_regs();
+        self.impeg_regs.fill(0);
+        self.impeg_fw.fill(0);
+        (self.impeg_pio, self.impeg_hi_valid) = (false, false);
     }
 
     pub fn reset_stream(&mut self) {
@@ -737,8 +744,16 @@ impl Dvc {
             if vec != 0 { vec } else { 0x1C }
         } else {
             let vec = ((self.get_fmv_word(FMV_IVEC) >> 3) & 0xFF) as u8;
+            if vec == 0 && self.impeg && !std::mem::replace(&mut self.impeg_ivec_zero_logged, true) {
+                eprintln!("IMPEG interrupt acknowledged with vector 0 (IVEC not written); using the spurious vector");
+            }
             if vec != 0 { vec } else { 0x1C }
         }
+    }
+
+    /// IMPEG addresses that some register, RAM or ROM answers; the rest of the cartridge window is a hole.
+    pub fn impeg_mapped(addr: u32) -> bool {
+        matches!(addr & 0x00FF_FFFF, 0xD00000..=0xDFFFFF | 0xE01000..=0xE01FFF | 0xE04000..=0xE043FF | 0xE04800..=0xE07FFF | 0xE40000..=0xEFFFFF)
     }
 
     pub fn tick(&mut self, cycles: u32) {
@@ -854,10 +869,14 @@ impl Dvc {
 
     fn impeg_audio_read(&mut self, off: usize) -> u8 {
         let Some(r) = Self::impeg_audio_reg(off) else { return self.impeg_regs[0x100 + off] };
-        self.refresh_fma_dynamic(r + (off & 1));
+        self.refresh_fma_dynamic(r);
         let mut w = self.get_fma_word(r);
-        if r == FMA_ISR || r == FMA_IER {
+        if r == FMA_ISR {
             w = Self::impeg_bits_from(w);
+        }
+        // IER reads back exactly as written; the translation keeps only the bits the model knows.
+        if r == FMA_IER {
+            w = u16::from_be_bytes([self.impeg_regs[0x100 + FMA_IER], self.impeg_regs[0x101 + FMA_IER]]);
         }
         // The status is acknowledged by reading it, as on VMPEG.
         if r == FMA_ISR && off & 1 == 1 {
@@ -897,7 +916,13 @@ impl Dvc {
     // Programmed I/O audio data: each word goes to the audio stream.
     fn impeg_pio_write(&mut self, off: usize, val: u8) {
         self.impeg_regs[0x1E + off] = val;
-        if off == 1 {
+        if !self.impeg_pio {
+            return;
+        }
+        // A word is complete only after its high byte came first.
+        if off == 0 {
+            self.impeg_hi_valid = true;
+        } else if std::mem::take(&mut self.impeg_hi_valid) {
             let hi = self.impeg_regs[0x1E];
             self.push_fma_stream_byte(hi);
             self.push_fma_stream_byte(val);
@@ -1570,8 +1595,9 @@ opencdi::impl_state!(Dvc {
     demux, fma_demux, mp2, audio_sample_rate, audio_out,
     video_decoder, video_width, video_height, frames_decoded_count, frames_presented_count, vsync_counter,
     underflow_count, fma_underflow_count, fma_decoded_since_play, fma_playout_end, has_valid_frame,
+    impeg_regs, impeg_pio, impeg_hi_valid,
 } skip {
-    rom, impeg, impeg_regs, impeg_fw, impeg_pio,
+    rom, impeg, impeg_fw, impeg_ivec_zero_logged,
 });
 
 opencdi::impl_state!(MpegSystemDemux {
@@ -1609,6 +1635,32 @@ impl opencdi::savestate::State for Mp2Decoder {
 
 #[cfg(test)]
 mod window_tests {
+    #[test]
+    fn impeg_audio_bits_pio_and_state() {
+        assert_eq!(Dvc::impeg_bits_from(0x0100 | 0x0008 | 0x0020 | 0x0001 | 0x0004), 0x0800 | 0x0100 | 0x0400 | 0x8000 | 0x0004);
+        assert_eq!(Dvc::impeg_bits_to(0x3D14), 0x0100 | 0x0020 | 0x0008 | 0x0010 | 0x0004);
+        let mut d = Dvc::new();
+        d.impeg = true;
+        d.write_word(0xE0421C, 0x3D14);
+        assert_eq!(d.read_word(0xE0421C), 0x3D14);
+        // Data-port words go to the stream only in PIO mode and only as complete words.
+        let before = d.fma_stream_fifo.len();
+        d.write_word(0xE0411E, 0x1234);
+        assert_eq!(d.fma_stream_fifo.len(), before);
+        d.write_word(0xE04200, 0x0100);
+        d.write_byte(0xE0411F, 0x56);
+        assert_eq!(d.fma_stream_fifo.len(), before);
+        d.write_word(0xE0411E, 0xABCD);
+        assert_eq!(d.fma_stream_fifo.len(), before + 2);
+        let mut buf = Vec::new();
+        opencdi::savestate::State::save(&d, &mut buf);
+        let mut e = Dvc::new();
+        opencdi::savestate::State::load(&mut e, &mut opencdi::savestate::Reader::new(&buf)).unwrap();
+        assert_eq!((e.impeg_pio, e.impeg_regs[0x11C], e.impeg_regs[0x11D]), (true, 0x3D, 0x14));
+        d.reset();
+        assert!(!d.impeg_pio && d.impeg_regs.iter().all(|&b| b == 0));
+    }
+
     use super::*;
 
     #[test]

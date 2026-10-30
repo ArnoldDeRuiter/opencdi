@@ -167,11 +167,51 @@ impl Ciap {
                 }
             }
             r if STORED.contains(&r) => self.set(r, value),
+            REG_ISR | REG_ID | REG_ASTAT => {
+                if self.loud.first(0x100 | reg) {
+                    eprintln!("CIAP write to read-only reg {:02X} <- {:04X} ignored pc~{:06X}", reg, value, pc);
+                }
+            }
             _ => {
                 if self.loud.first(0x100 | reg) {
-                    eprintln!("CIAP unmodelled write reg {:02X} <- {:04X} pc~{:06X}", reg, value, pc);
+                    eprintln!("CIAP unmodelled write reg {:02X} <- {:04X} ignored pc~{:06X}", reg, value, pc);
                 }
-                self.set(reg, value);
+            }
+        }
+    }
+
+    /// Byte read of one register lane (`hi`: the even address); a status byte read clears only that byte.
+    pub fn read_reg_byte(&mut self, reg: u32, hi: bool, pc: u32) -> u8 {
+        let reg = reg & 0x7E;
+        let w = if reg == REG_ISR {
+            let w = self.reg(REG_ISR);
+            self.set(REG_ISR, w & if hi { 0x00FF } else { 0xFF00 });
+            if self.trace {
+                eprintln!("CIAP RD8 {:02X}{} = {:04X} pc~{:06X}", reg, if hi { "H" } else { "L" }, w, pc);
+            }
+            w
+        } else {
+            self.read_reg(reg, pc)
+        };
+        if hi { (w >> 8) as u8 } else { w as u8 }
+    }
+
+    /// Byte write of one register lane; buffer-manager bits act on that lane only, command registers are logged.
+    pub fn write_reg_byte(&mut self, reg: u32, hi: bool, value: u8, pc: u32) {
+        let reg = reg & 0x7E;
+        let (mask, v) = if hi { (0xFF00u16, (value as u16) << 8) } else { (0x00FF, value as u16) };
+        match reg {
+            REG_BMAN => self.write_reg(reg, v, pc),
+            REG_CCR | REG_APCR | REG_DMACTL => {
+                if self.loud.first(0x400 | reg) {
+                    eprintln!("CIAP byte write to command reg {:02X}{} <- {:02X} pc~{:06X}", reg, if hi { "H" } else { "L" }, value, pc);
+                }
+                let cur = self.reg(reg);
+                self.write_reg(reg, (cur & !mask) | v, pc);
+            }
+            _ => {
+                let cur = self.peek_reg(reg);
+                self.write_reg(reg, (cur & !mask) | v, pc);
             }
         }
     }
@@ -278,5 +318,20 @@ mod tests {
         c.write_reg(REG_BMAN, 0x04, 0);
         assert_eq!(c.peek_reg(REG_BMAN), 0x08);
         assert_eq!(c.read_reg(REG_ID, 0), CHIP_ID);
+    }
+
+    #[test]
+    fn byte_lanes_and_read_only_registers() {
+        let mut c = Ciap::default();
+        c.regs[(REG_ISR >> 1) as usize] = 0x0405;
+        assert_eq!(c.read_reg_byte(REG_ISR, true, 0), 0x04);
+        assert_eq!(c.peek_reg(REG_ISR), 0x0005);
+        c.regs[(REG_BMAN >> 1) as usize] = 0x0C0C;
+        c.write_reg_byte(REG_BMAN, false, 0x04, 0);
+        assert_eq!(c.peek_reg(REG_BMAN) & 0xFF00, 0x0C00);
+        c.write_reg(REG_ID, 0x1234, 0);
+        c.write_reg(REG_ASTAT, 0x1234, 0);
+        c.write_reg(0x30, 0x1234, 0);
+        assert_eq!((c.peek_reg(REG_ID), c.peek_reg(REG_ASTAT), c.peek_reg(0x30)), (CHIP_ID, 0, 0));
     }
 }

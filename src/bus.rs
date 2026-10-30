@@ -1089,8 +1089,7 @@ impl CdiBus {
             0x300000..=0x303FFF => {
                 let off = addr - 0x300000;
                 if ciap::Ciap::is_reg(off) {
-                    let w = m.ciap.read_reg(off - ciap::REG_BASE, pc);
-                    return if (addr & 1) == 0 { (w >> 8) as u8 } else { w as u8 };
+                    return m.ciap.read_reg_byte(off - ciap::REG_BASE, (addr & 1) == 0, pc);
                 }
                 return m.ciap.ram[off as usize];
             }
@@ -1125,10 +1124,7 @@ impl CdiBus {
             0x300000..=0x303FFF => {
                 let off = addr - 0x300000;
                 if ciap::Ciap::is_reg(off) {
-                    let reg = off - ciap::REG_BASE;
-                    let cur = m.ciap.peek_reg(reg);
-                    let v = if (addr & 1) == 0 { (cur & 0x00FF) | ((value as u16) << 8) } else { (cur & 0xFF00) | value as u16 };
-                    m.ciap.write_reg(reg, v, pc);
+                    m.ciap.write_reg_byte(off - ciap::REG_BASE, (addr & 1) == 0, value, pc);
                     if let Some(c) = m.ciap.dma_request.take() {
                         self.perform_ciap_dma(c);
                     }

@@ -288,14 +288,21 @@ impl Ciap {
         }
     }
 
-    // Commands: 0x94 and 0xC4 start delivery, 0x100 stops it; Q reporting with 0x10, 0x44 and 0x94, not with 0xC4.
+    // Commands: 0x94, 0xC4, 0x44 and 0x80 start delivery, 0x100 stops it; Q reporting with 0x10, 0x44 and 0x94, not with 0xC4.
     fn command(&mut self, v: u16, pc: u32) {
         match v {
             0x0094 => (self.running, self.q_mode) = (true, true),
             0x00C4 => (self.running, self.q_mode) = (true, false),
             0x0100 => (self.running, self.q_mode) = (false, false),
-            0x0010 | 0x0044 => self.q_mode = true,
-            0x0008 | 0x7000 | 0x3000 | 0x0080 | 0x0200 | 0x0040 => {}
+            0x0044 => (self.running, self.q_mode) = (true, true),
+            0x0080 => self.running = true,
+            0x0010 => self.q_mode = true,
+            // Accepted without a modelled effect; logged once so a run shows they arrived.
+            0x0008 | 0x7000 | 0x3000 | 0x0200 | 0x0040 => {
+                if self.loud.first(0x1_0000 | v as u32) {
+                    eprintln!("CIAP command {:04X} accepted, no effect modelled pc~{:06X}", v, pc);
+                }
+            }
             _ => {
                 if self.loud.first(0x1_0000 | v as u32) {
                     eprintln!("CIAP unmodelled command {:04X} pc~{:06X}", v, pc);
@@ -343,6 +350,19 @@ mod tests {
         c.write_reg(REG_ASTAT, 0x1234, 0);
         c.write_reg(0x30, 0x1234, 0);
         assert_eq!((c.peek_reg(REG_ID), c.peek_reg(REG_ASTAT), c.peek_reg(0x30)), (CHIP_ID, 0, 0));
+    }
+
+    #[test]
+    fn rearm_commands_restart_delivery() {
+        let mut c = Ciap::default();
+        for v in [0x0100, 0x0200, 0x7000, 0x0044, 0x0080] {
+            c.write_reg(REG_CCR, v, 0);
+        }
+        assert!(c.running && c.q_mode);
+        for v in [0x0100, 0x0200, 0x3000, 0x0010, 0x0080] {
+            c.write_reg(REG_CCR, v, 0);
+        }
+        assert!(c.running && c.q_mode);
     }
 
     #[test]

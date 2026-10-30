@@ -150,6 +150,8 @@ impl CdiBus {
 
     /// Player reset from the slave: every device as at power-on, but RAM keeps its contents.
     pub fn player_reset(&mut self) {
+        // The system reset line resets the main board; the IKAT runs on its own reset and keeps its state.
+        let ikat = self.mono4.as_deref_mut().map(|m| std::mem::take(&mut m.ikat));
         let planes = (self.mcd212.plane_a.clone(), self.mcd212.plane_b.clone());
         let (cdic_ram, sys_ram) = (self.cdic.ram.clone(), self.sys_ram.clone());
         let dvc_ram = (self.dvc.ram1.clone(), self.dvc.ram2.clone());
@@ -158,6 +160,10 @@ impl CdiBus {
         (self.cdic.ram, self.sys_ram) = (cdic_ram, sys_ram);
         (self.dvc.ram1, self.dvc.ram2) = dvc_ram;
         self.mcd212.plane_a[0..8].copy_from_slice(&self.rom[0..8]);
+        if let (Some(mut k), Some(m)) = (ikat, self.mono4.as_deref_mut()) {
+            k.reset_request = false;
+            m.ikat = k;
+        }
     }
 
     #[inline(always)]

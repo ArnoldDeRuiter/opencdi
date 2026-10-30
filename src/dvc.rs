@@ -406,6 +406,7 @@ pub struct Dvc {
     pub impeg: bool, // IMPEG cartridge on the Mono-IV board: extra register windows below
     pub impeg_regs: Vec<u8>, // 0xE04100-0xE043FF on IMPEG (data port and audio block)
     pub impeg_fw: Vec<u8>, // 0xE04800-0xE07FFF on IMPEG: firmware windows, plain RAM, never run
+    pub impeg_pio: bool, // IMPEG audio fed by programmed I/O
 
     // Mirrored fields for easy access
     pub fma_cmd: u16,
@@ -490,6 +491,7 @@ impl Dvc {
             impeg: false,
             impeg_regs: vec![0; 0x300],
             impeg_fw: vec![0; 0x3800],
+            impeg_pio: false,
 
             fma_cmd: 0,
             fma_isr: 0,
@@ -730,7 +732,7 @@ impl Dvc {
         let fma_isr = self.get_fma_word(FMA_ISR);
         let fma_ier = self.get_fma_word(FMA_IER);
         let fma_ivec = self.get_fma_word(FMA_IVEC);
-        if (fma_isr & fma_ier) != 0 {
+        if (fma_isr & fma_ier) != 0 && !self.impeg {
             let vec = (fma_ivec & 0x00FF) as u8;
             if vec != 0 { vec } else { 0x1C }
         } else {
@@ -821,6 +823,87 @@ impl Dvc {
         self.set_fmv_word(FMV_ISR, 0);
     }
 
+    // IMPEG audio block offset (from 0xE04200) to the VMPEG audio register it stands for; attenuation has none.
+    fn impeg_audio_reg(off: usize) -> Option<usize> {
+        match off & !1 {
+            0x00 | 0x02 | 0x04 | 0x06 | 0x08 | 0x0A | 0x10 | 0x12 | 0x14 | 0x16 | 0x18 | 0x1A | 0x1C => Some(off & !1),
+            _ => None,
+        }
+    }
+
+    // IMPEG audio interrupt bits from the VMPEG layout: timer 0x100 to 0x800, end 0x08 to 0x100, error 0x20 to 0x400, trigger 0x01 to 0x8000.
+    fn impeg_bits_from(v: u16) -> u16 {
+        let mut o = v & 0x0016;
+        for (from, to) in [(0x0100, 0x0800), (0x0008, 0x0100), (0x0020, 0x0400), (0x0001, 0x8000)] {
+            if v & from != 0 {
+                o |= to;
+            }
+        }
+        o
+    }
+
+    fn impeg_bits_to(v: u16) -> u16 {
+        let mut o = v & 0x0016;
+        for (to, from) in [(0x0100, 0x0800), (0x0008, 0x0100), (0x0020, 0x0400), (0x0001, 0x8000)] {
+            if v & from != 0 {
+                o |= to;
+            }
+        }
+        o
+    }
+
+    fn impeg_audio_read(&mut self, off: usize) -> u8 {
+        let Some(r) = Self::impeg_audio_reg(off) else { return self.impeg_regs[0x100 + off] };
+        self.refresh_fma_dynamic(r + (off & 1));
+        let mut w = self.get_fma_word(r);
+        if r == FMA_ISR || r == FMA_IER {
+            w = Self::impeg_bits_from(w);
+        }
+        // The status is acknowledged by reading it, as on VMPEG.
+        if r == FMA_ISR && off & 1 == 1 {
+            self.acknowledge_fma_isr();
+        }
+        if off & 1 == 0 { (w >> 8) as u8 } else { w as u8 }
+    }
+
+    fn impeg_audio_write(&mut self, off: usize, val: u8) {
+        self.impeg_regs[0x100 + off] = val;
+        let Some(r) = Self::impeg_audio_reg(off) else { return };
+        if off & 1 == 0 {
+            return;
+        }
+        let w = u16::from_be_bytes([self.impeg_regs[0x100 + (off & !1)], val]);
+        match r {
+            FMA_IER => self.set_fma_word(r, Self::impeg_bits_to(w)),
+            FMA_ISR => self.acknowledge_fma_isr(),
+            FMA_CMD => {
+                // 0x100 selects programmed I/O through 0x11E; leaving it feeds what came in.
+                let pio = w & 0x0100 != 0;
+                if self.impeg_pio && !pio {
+                    self.process_stream();
+                }
+                self.impeg_pio = pio;
+                self.set_fma_word(r, w & !0x0100);
+                self.handle_fma_write(r);
+            }
+            _ => {
+                self.set_fma_word(r, w);
+                self.handle_fma_write(r);
+            }
+        }
+        self.count_reg_write();
+    }
+
+    // Programmed I/O audio data: each word goes to the audio stream.
+    fn impeg_pio_write(&mut self, off: usize, val: u8) {
+        self.impeg_regs[0x1E + off] = val;
+        if off == 1 {
+            let hi = self.impeg_regs[0x1E];
+            self.push_fma_stream_byte(hi);
+            self.push_fma_stream_byte(val);
+        }
+    }
+
     pub fn acknowledge_fma_isr(&mut self) {
         self.set_fma_word(FMA_ISR, 0);
     }
@@ -850,6 +933,7 @@ impl Dvc {
                 }
                 val
             }
+            0xE04200..=0xE0421F if self.impeg => self.impeg_audio_read((a - 0xE04200) as usize),
             0xE04100..=0xE043FF if self.impeg => self.impeg_regs[(a - 0xE04100) as usize],
             0xE04800..=0xE07FFF if self.impeg => self.impeg_fw[(a - 0xE04800) as usize],
             0xE04000..=0xE040FF => {
@@ -889,6 +973,8 @@ impl Dvc {
                     self.count_reg_write();
                 }
             }
+            0xE04200..=0xE0421F if self.impeg => self.impeg_audio_write((a - 0xE04200) as usize, val),
+            0xE0411E..=0xE0411F if self.impeg => self.impeg_pio_write((a - 0xE0411E) as usize, val),
             0xE04100..=0xE043FF if self.impeg => self.impeg_regs[(a - 0xE04100) as usize] = val,
             0xE04800..=0xE07FFF if self.impeg => self.impeg_fw[(a - 0xE04800) as usize] = val,
             0xE04000..=0xE040FF => {
@@ -1485,7 +1571,7 @@ opencdi::impl_state!(Dvc {
     video_decoder, video_width, video_height, frames_decoded_count, frames_presented_count, vsync_counter,
     underflow_count, fma_underflow_count, fma_decoded_since_play, fma_playout_end, has_valid_frame,
 } skip {
-    rom, impeg, impeg_regs, impeg_fw,
+    rom, impeg, impeg_regs, impeg_fw, impeg_pio,
 });
 
 opencdi::impl_state!(MpegSystemDemux {

@@ -272,7 +272,9 @@ impl Ikat {
             0xF6 => self.respond(2, &[0xA5, 0xF6, if self.pal { 0x02 } else { 0x01 }, 0xFF]),
             0xF7 => self.respond(2, &[0xA5, 0xF7, 0x00, 0xFF]),
             // No reply: the F9 query times out in the BIOS after 100 ticks and reads as "no I2C device".
-            0xF9 | 0xFA => {}
+            // Video encoder query: version 1 gives the same state as no reply without the 100-tick wait.
+            0xF9 => self.respond(2, &[0xA5, 0xF9, 0x01]),
+            0xFA => {}
             0x80 => self.keyboard_enabled = true,
             // Set-up commands without a reply.
             0x84..=0x86 | 0x8F => {}
@@ -354,7 +356,10 @@ mod tests {
         k.write(0x05, 0xF0, 0);
         let r: Vec<u8> = (0..3).map(|_| k.read(0x0D, 0)).collect();
         assert_eq!(r, [0xA5, 0xF0, 0x72]);
-        for c in [0xF8, 0xF9, 0x84, 0x85, 0x86, 0x88, 0x8F, 0x91] {
+        k.write(0x05, 0xF9, 0);
+        let r: Vec<u8> = (0..3).map(|_| k.read(0x0D, 0)).collect();
+        assert_eq!(r, [0xA5, 0xF9, 0x01]);
+        for c in [0xF8, 0xFA, 0x84, 0x85, 0x86, 0x88, 0x8F, 0x91] {
             k.write(0x05, c, 0);
             assert_eq!(k.pending(), 0);
         }

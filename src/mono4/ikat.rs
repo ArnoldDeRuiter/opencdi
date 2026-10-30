@@ -28,7 +28,7 @@ pub struct Ikat {
     pub mode: u8,
     pub imr: u8,
     pub ports: [Port; 4],
-    pub pointer_enabled: bool,
+    pub keyboard_enabled: bool, // port C 80: key events on port C (not modelled yet)
     pub pal: bool, // video standard reported by the identification reply; set by the bus before each write
     pub disc_present: bool,
     pub status_polls: u8, // drive status polls answered since the disc appeared
@@ -45,7 +45,7 @@ impl Default for Ikat {
             mode: 0,
             imr: 0,
             ports: Default::default(),
-            pointer_enabled: false,
+            keyboard_enabled: false,
             pal: true,
             disc_present: false,
             status_polls: 0,
@@ -261,12 +261,23 @@ impl Ikat {
     // Port C: identification and set-up, single-byte commands.
     fn execute_c(&mut self, c: u8, pc: u32) {
         match c {
-            0xF0 | 0xF1 | 0xF2 | 0xF4 | 0xF8 => self.respond(2, &[0xA5, c, 0x00]),
+            // IKAT release 0x72.
+            0xF0 => self.respond(2, &[0xA5, 0xF0, 0x72]),
+            0xF1 | 0xF2 | 0xF4 => self.respond(2, &[0xA5, c, 0x00]),
             0xF3 => self.respond(2, &[0xA5, 0xF3, 0x4B, 0x4D]),
             0xF6 => self.respond(2, &[0xA5, 0xF6, if self.pal { 0x02 } else { 0x01 }, 0xFF]),
             0xF7 => self.respond(2, &[0xA5, 0xF7, 0x00, 0xFF]),
-            0x80 => self.pointer_enabled = true,
+            // No reply: the F9 query times out in the BIOS after 100 ticks and reads as "no I2C device".
+            0xF9 | 0xFA => {}
+            0x80 => self.keyboard_enabled = true,
+            // Set-up commands without a reply.
+            0x84..=0x86 | 0x8F => {}
             0x8C..=0x8E => self.arm_b(c),
+            0x88 => {
+                if self.loud.first(0x2_0000 | c as u32) {
+                    eprintln!("IKAT system reset request (port C 88), not modelled pc~{:06X}", pc);
+                }
+            }
             _ => {
                 if self.loud.first(0x2_0000 | c as u32) {
                     eprintln!("IKAT unmodelled port C command {:02X} pc~{:06X}", c, pc);
@@ -310,7 +321,7 @@ impl Ikat {
 }
 
 opencdi::impl_state!(Port { cmd, reply, len } skip {});
-opencdi::impl_state!(Ikat { mode, imr, ports, pointer_enabled, pal, disc_present, status_polls, pointer } skip { drive_busy, drive_event, loud, trace });
+opencdi::impl_state!(Ikat { mode, imr, ports, keyboard_enabled, pal, disc_present, status_polls, pointer } skip { drive_busy, drive_event, loud, trace });
 
 #[cfg(test)]
 mod tests {
@@ -327,6 +338,15 @@ mod tests {
         let r: Vec<u8> = (0..5).map(|_| k.read(0x0D, 0)).collect();
         assert_eq!(r, [0xA5, 0xF6, 0x02, 0xFF, 0xFF]);
         assert!(!k.irq());
+        k.write(0x05, 0xF0, 0);
+        let r: Vec<u8> = (0..3).map(|_| k.read(0x0D, 0)).collect();
+        assert_eq!(r, [0xA5, 0xF0, 0x72]);
+        for c in [0xF8, 0xF9, 0x84, 0x85, 0x86, 0x88, 0x8F, 0x91] {
+            k.write(0x05, c, 0);
+            assert_eq!(k.pending(), 0);
+        }
+        k.write(0x05, 0x80, 0);
+        assert!(k.keyboard_enabled);
     }
 
     #[test]

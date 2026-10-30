@@ -90,7 +90,7 @@ impl Ikat {
         self.respond(3, &[0xB0, 0x00, st[0], st[1]]);
     }
 
-    /// Host pointer position and buttons; reported on port B while pointer reports are enabled (enable bit 0x08).
+    /// Host pointer position and buttons; reported on port B on every change while pointer reports are enabled (enable bit 0x08).
     pub fn update_pointer(&mut self, x: i32, y: i32, buttons: u8) {
         let p = (x.clamp(0, 767), y.clamp(0, 559), buttons);
         if p != self.pointer {
@@ -101,7 +101,7 @@ impl Ikat {
         }
     }
 
-    // Absolute report: x and y scaled to 0..1023; the third button also presses buttons 1 and 2.
+    // Absolute report: x and y scaled to 0..1023, second byte bit 4 always set (never read by the BIOS); the third button presses buttons 1 and 2.
     fn send_pointer(&mut self) {
         let (x, y, b) = self.pointer;
         let (x, y) = ((x * 0x3FF / 0x2FF) as u16, (y * 0x3FF / 0x22F) as u16);
@@ -109,7 +109,7 @@ impl Ikat {
         let (b1, b2) = (b & 1 != 0 || third, b & 2 != 0 || third);
         let r = [
             0x40 | if b1 { 0x20 } else { 0 } | if b2 { 0x10 } else { 0 } | ((x >> 6) & 0x0F) as u8,
-            ((y >> 6) & 0x0F) as u8 | if third { 0x10 } else { 0 },
+            0x10 | ((y >> 6) & 0x0F) as u8,
             (x & 0x3F) as u8,
             (y & 0x3F) as u8 | 0x80,
         ];
@@ -207,9 +207,8 @@ impl Ikat {
                 if self.trace {
                     eprintln!("IKAT ICTL <= {:02X} pc~{:06X}", value, pc);
                 }
-                let started = value & !self.imr & pending_bit(1) != 0;
                 self.imr = value;
-                if started {
+                if value & pending_bit(1) != 0 {
                     self.send_pointer();
                 }
                 self.trace_irq(irq);
@@ -367,10 +366,18 @@ mod tests {
         let mut k = Ikat { pointer: (384, 280, 0), ..Ikat::default() };
         k.write(0x1B, 0x08, 0);
         let r: Vec<u8> = (0..4).map(|_| k.read(0x0B, 0)).collect();
-        assert_eq!(r, [0x48, 0x08, 0x00, 0x80]);
+        assert_eq!(r, [0x48, 0x18, 0x00, 0x80]);
+        k.write(0x1B, 0x88, 0);
+        assert_eq!(k.pending(), 0x08);
+        k.update_pointer(0, 0, 1);
+        let r: Vec<u8> = (0..4).map(|_| k.read(0x0B, 0)).collect();
+        assert_eq!(r, [0x60, 0x10, 0x00, 0x80]);
         k.update_pointer(767, 559, 4);
         let r: Vec<u8> = (0..4).map(|_| k.read(0x0B, 0)).collect();
         assert_eq!(r, [0x7F, 0x1F, 0x3F, 0xBF]);
+        k.write(0x1B, 0x80, 0);
+        k.update_pointer(10, 10, 0);
+        assert_eq!(k.pending(), 0);
     }
 
     #[test]

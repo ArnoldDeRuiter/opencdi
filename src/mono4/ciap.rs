@@ -33,6 +33,9 @@ pub const BMAN_RESET: u16 = 0x0054;
 const DATA_BUFS: [(u16, usize); 2] = [(0x04, 0x1200), (0x08, 0x1BC2)];
 const DATA_LEN: usize = 2340;
 
+// Sync field of a data sector as a byte-swapped image stores it.
+const SWAPPED_SYNC: [u8; 12] = [0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF];
+
 // Header check: BCD time of the sector plus 150, mode 1 or 2, and for mode 2 two equal subheader copies.
 fn header_valid(lba: u32, raw: &[u8; CD_SECTOR_RAW_SIZE]) -> bool {
     let bcd = |v: u32| (((v / 10) << 4) | (v % 10)) as u8;
@@ -57,7 +60,7 @@ pub struct Ciap {
     pub toc: bool, // table of contents read: Q reports carry lead-in entries
     pub toc_index: usize,
     pub start_delay: u8, // sector periods after a seek before the first sector
-    pub drive_stopped: bool, // the drive stopped because delivery was off; the board reports it
+    pub drive_stopped: bool, // the drive stopped because delivery was off; the board reports it (cleared within the same tick)
     pub cycles: u32,
     pub dma_request: Option<u16>,
     pub seeks: u64,
@@ -282,11 +285,13 @@ impl Ciap {
         DATA_BUFS.iter().find(|&&(bit, _)| bman & bit != 0).map(|&(_, at)| at)
     }
 
-    // Byte-swapped images (sync read as FF 00) are swapped back for good; a sector whose header does not check is descrambled if that makes it check.
+    // A data sector whose sync field reads byte-swapped marks the image swapped; failing headers are descrambled if that fixes them.
     fn repair(&mut self, lba: u32, raw: &mut [u8; CD_SECTOR_RAW_SIZE]) {
-        if raw[0] == 0xFF && raw[1] == 0x00 && !self.byteswap {
+        if !self.byteswap && raw[..12] == SWAPPED_SYNC {
             self.byteswap = true;
-            eprintln!("CIAP disc image is byte-swapped (sector {}); swapping every sector", lba);
+            if self.loud.first(0x6_0000) {
+                eprintln!("CIAP disc image is byte-swapped (sector {}); swapping every sector", lba);
+            }
         }
         if self.byteswap {
             raw.chunks_exact_mut(2).for_each(|p| p.swap(0, 1));
@@ -318,6 +323,7 @@ impl Ciap {
             self.q_locator(cd, lba);
         }
         let (file, channel, submode) = (raw[16], raw[17], raw[18]);
+        // Every sector, audio included, goes to the data buffer; the CPU copies audio out itself (no chip-side audio path).
         let taken = self.data_buffer().map(|at| self.ram[at..at + DATA_LEN].copy_from_slice(&raw[12..12 + DATA_LEN]));
         let mut flags = if taken.is_some() { ISR_DATA } else { 0 };
         if submode & 0x10 != 0 {
@@ -351,7 +357,7 @@ impl Ciap {
         self.q_reports += 1;
     }
 
-    // One lead-in Q entry per sector period into the current Q buffer (BMAN bit 4: 0x1B24, else 0x24E6): A0 first track and disc type, A1 last track, A2 lead-out, then each track start; repeats.
+    // One lead-in Q entry per sector period into the current Q buffer: A0, A1, A2, then each track start, repeating.
     fn toc_entry(&mut self, cd: &CdRom) {
         let bcd = |v: u32| (((v / 10) << 4) | (v % 10)) as u8;
         let msf = |lba: u32| { let f = lba + 150; [bcd(f / 4500), bcd(f / 75 % 60), bcd(f % 75)] };

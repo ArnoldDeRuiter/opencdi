@@ -34,7 +34,7 @@ pub enum BoardKind {
 pub struct CdiBus {
     pub board: BoardKind,
     pub mono4: Option<Box<Mono4>>, // Some exactly when `board` is Mono4
-    pub mono4_bus_errors: bool, // Mono-IV: unmapped data accesses raise a bus error (default); CDI_MONO4_BUSERR=0 reads 0xFF instead
+    pub mono4_bus_errors: bool, // Mono-IV: unmapped data accesses raise a bus error; debug switch CDI_MONO4_BUSERR=0 reads 0xFF instead
     pub rom: Box<[u8; 512 * 1024]>,
     pub sys_ram: Box<[u8; 512 * 1024]>,
     pub dvc: Dvc,
@@ -1084,7 +1084,7 @@ impl CdiBus {
         self.wr8(address.wrapping_add(1), value as u8);
     }
 
-    /// Mono-IV address with no device behind it (the unconnected lanes of IKAT and NVRAM are mapped); the on-chip block is only at 0x80000000, its 24-bit alias at 0x800000 counts as unmapped.
+    /// Mono-IV address with no device; the on-chip block is only at 0x80000000, not at its 0x800000 alias.
     fn mono4_unmapped_address(address: u32) -> bool {
         if (address & 0xFFFF_0000) == 0x8000_0000 {
             return false;
@@ -1218,6 +1218,7 @@ impl CdiBus {
         let m = self.mono4.as_deref()?;
         match addr {
             0x300000..=0x303FFF if !ciap::Ciap::is_reg(addr - 0x300000) => Some(m.ciap.ram[(addr - 0x300000) as usize]),
+            0x320000..=0x32FFFF => opencdi::mono4::nvram::Nvram32::index(addr - 0x320000).map(|i| m.nvram.peek(i)),
             _ => None,
         }
     }

@@ -199,6 +199,11 @@ impl Machine {
             bus.tick_board(cyc_per_line);
         }
         bus.counters.end_frame();
+        // A double fault parks the CPU for good; say so once instead of idling silently.
+        if cpu.is_halted() && !bus.counters.halted {
+            bus.counters.halted = true;
+            eprintln!("CPU halted (double fault) at frame {} pc {:06X}", bus.current_frame, cpu.pc);
+        }
         if bus.taps.pc && bus.counters.frames % 10 == 0 {
             eprintln!("PC F{} {:06X}", bus.current_frame, cpu.pc);
         }

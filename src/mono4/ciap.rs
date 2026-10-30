@@ -90,7 +90,7 @@ impl Ciap {
     pub fn reset(&mut self) {
         self.regs = power_on_regs();
         (self.running, self.q_mode, self.lba, self.drive_active) = (false, false, 0, false);
-        (self.start_delay, self.drive_stopped) = (0, false);
+        (self.start_delay, self.drive_stopped, self.toc, self.toc_index) = (0, false, false, 0);
     }
 
     /// Drive request from IKAT port D: a seek positions the next sector and starts the drive, a stop halts delivery.
@@ -101,7 +101,8 @@ impl Ciap {
                 self.seeks += 1;
             }
             super::ikat::DriveEvent::Stop => (self.drive_active, self.toc) = (false, false),
-            super::ikat::DriveEvent::Toc => (self.toc, self.toc_index) = (true, 0),
+            // A table of contents read ends any running data read.
+            super::ikat::DriveEvent::Toc => (self.toc, self.toc_index, self.drive_active) = (true, 0, false),
         }
         if self.trace {
             eprintln!("CIAP DRIVE {:?}", ev);
@@ -496,6 +497,16 @@ mod tests {
         swapped.chunks_exact_mut(2).for_each(|p| p.swap(0, 1));
         c.repair(16, &mut swapped);
         assert!(c.byteswap && swapped == good);
+    }
+
+    #[test]
+    fn toc_request_ends_a_data_read_and_reset_clears_it() {
+        let mut c = Ciap::default();
+        c.drive(super::super::ikat::DriveEvent::Seek(13));
+        c.drive(super::super::ikat::DriveEvent::Toc);
+        assert!(c.toc && !c.drive_active);
+        c.reset();
+        assert!(!c.toc && c.toc_index == 0);
     }
 
     #[test]

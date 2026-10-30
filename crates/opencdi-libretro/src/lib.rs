@@ -19,6 +19,8 @@ use std::sync::{Mutex, MutexGuard};
 pub const BIOS_NAMES: &[&str] = &["cdi220b.rom", "cdi200.rom", "cdimono1.zip", "cdibios.zip", "cdi.rom", "cdi220.rom", "cdi490a.rom", "cdi490a.zip"];
 // Cartridge ROM, looked up the same way; cdimono1.zip carries vmpega.rom next to the system ROMs.
 pub const DVC_NAMES: &[&str] = &["vmpega.rom", "cdimono1.zip", "cdibios.zip"];
+// The IMPEG cartridge ROM, fitted only on the CD-i 490 (Mono-IV) board.
+pub const IMPEG_NAMES: &[&str] = &["impega.rom"];
 const BIOS_SUBDIRS: &[&str] = &[""];
 const MESSAGE_FRAMES: c_uint = 360;
 // Room above the size measured at the first serialize_size call, for buffers that grow later (DVC decoder, FIFOs).
@@ -257,6 +259,22 @@ fn option_value(key: &CStr) -> Option<String> {
 }
 
 // Checks cartridge candidates in order and logs each verdict; only a known VMPEG dump is fitted.
+// The IMPEG cartridge for the 490 board; only the known dump is fitted.
+fn find_impeg(dir: &Path) -> Option<PathBuf> {
+    for p in candidates(dir, IMPEG_NAMES) {
+        match Machine::read_dvc_for(&p, opencdi::bus::BoardKind::Mono4) {
+            Ok((_, img)) if img.report.status == bios::Status::Ok => {
+                log(RETRO_LOG_INFO, &format!("IMPEG {}: {}", p.display(), img.report.message));
+                return Some(p);
+            }
+            Ok((_, img)) => log(RETRO_LOG_WARN, &format!("IMPEG {}: {}", p.display(), img.report.message)),
+            Err(e) => log(RETRO_LOG_WARN, &format!("IMPEG {}: {}", p.display(), e)),
+        }
+    }
+    log(RETRO_LOG_INFO, "no IMPEG cartridge ROM (impega.rom); Digital Video titles will ask for the cartridge");
+    None
+}
+
 fn find_dvc(dir: &Path) -> Option<PathBuf> {
     let candidates = candidates(dir, DVC_NAMES);
     if candidates.is_empty() {
@@ -292,7 +310,7 @@ fn boot(spec: &LoadSpec) -> Result<Machine, String> {
     let mut m = Machine::new();
     m.load_bios(&spec.bios).map_err(|e| format!("cannot load BIOS {}: {}", spec.bios.display(), e))?;
     if let Some(p) = &spec.dvc {
-        let (_, img) = Machine::read_dvc(p).map_err(|e| format!("cannot load DVC ROM {}: {}", p.display(), e))?;
+        let (_, img) = Machine::read_dvc_for(p, m.bus.board).map_err(|e| format!("cannot load DVC ROM {}: {}", p.display(), e))?;
         if img.report.status != bios::Status::Ok {
             return Err(format!("DVC ROM {} changed: {}", p.display(), img.report.message));
         }
@@ -687,8 +705,7 @@ fn load(game: *const retro_game_info) -> Result<(), String> {
         log(RETRO_LOG_INFO, "DVC cartridge off (core option)");
         None
     } else if mono4 {
-        log(RETRO_LOG_INFO, "CD-i 490 board: the VMPEG cartridge does not fit, DVC off");
-        None
+        find_impeg(&dir)
     } else {
         find_dvc(&dir)
     };

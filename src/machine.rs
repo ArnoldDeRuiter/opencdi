@@ -71,11 +71,20 @@ impl Machine {
     /// Fits a checked cartridge ROM.
     pub fn load_dvc_image(&mut self, img: &BiosImage) {
         self.bus.dvc.load_rom_bytes(&img.data);
+        self.bus.dvc.impeg = self.bus.board == BoardKind::Mono4;
     }
 
-    /// Checks and fits a cartridge ROM; refuses images whose check failed (an unknown image loads with a warning).
+    /// Reads a cartridge ROM checked for a board: IMPEG on Mono-IV, VMPEG (or an unknown image) on Mono-I.
+    pub fn read_dvc_for<P: AsRef<Path>>(path: P, board: BoardKind) -> std::io::Result<(Option<String>, BiosImage)> {
+        match board {
+            BoardKind::Mono1 => Self::read_dvc(path),
+            BoardKind::Mono4 => Ok((None, bios::inspect_impeg(std::fs::read(path)?))),
+        }
+    }
+
+    /// Checks and fits a cartridge ROM for the current board; refuses images whose check failed (an unknown image loads with a warning on Mono-I).
     pub fn load_dvc<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<bios::Report> {
-        let (entry, img) = Self::read_dvc(path)?;
+        let (entry, img) = Self::read_dvc_for(path, self.bus.board)?;
         let mut report = img.report.clone();
         if let Some(e) = entry {
             report.message = format!("{}: {}", e, report.message);

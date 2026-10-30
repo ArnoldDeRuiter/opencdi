@@ -403,6 +403,9 @@ pub struct Dvc {
     // Register files (256 bytes each)
     pub fma_regs: Box<[u8; 256]>,
     pub fmv_regs: Box<[u8; 256]>,
+    pub impeg: bool, // IMPEG cartridge on the Mono-IV board: extra register windows below
+    pub impeg_regs: Vec<u8>, // 0xE04100-0xE043FF on IMPEG (data port and audio block)
+    pub impeg_fw: Vec<u8>, // 0xE04800-0xE07FFF on IMPEG: firmware windows, plain RAM, never run
 
     // Mirrored fields for easy access
     pub fma_cmd: u16,
@@ -484,6 +487,9 @@ impl Dvc {
 
             fma_regs: vec![0u8; 256].into_boxed_slice().try_into().unwrap(),
             fmv_regs: vec![0u8; 256].into_boxed_slice().try_into().unwrap(),
+            impeg: false,
+            impeg_regs: vec![0; 0x300],
+            impeg_fw: vec![0; 0x3800],
 
             fma_cmd: 0,
             fma_isr: 0,
@@ -844,6 +850,8 @@ impl Dvc {
                 }
                 val
             }
+            0xE04100..=0xE043FF if self.impeg => self.impeg_regs[(a - 0xE04100) as usize],
+            0xE04800..=0xE07FFF if self.impeg => self.impeg_fw[(a - 0xE04800) as usize],
             0xE04000..=0xE040FF => {
                 let offset = (a - 0xE04000) as usize;
                 self.refresh_fmv_dynamic();
@@ -881,6 +889,8 @@ impl Dvc {
                     self.count_reg_write();
                 }
             }
+            0xE04100..=0xE043FF if self.impeg => self.impeg_regs[(a - 0xE04100) as usize] = val,
+            0xE04800..=0xE07FFF if self.impeg => self.impeg_fw[(a - 0xE04800) as usize] = val,
             0xE04000..=0xE040FF => {
                 let offset = (a - 0xE04000) as usize;
                 self.fmv_regs[offset] = val;
@@ -1475,7 +1485,7 @@ opencdi::impl_state!(Dvc {
     video_decoder, video_width, video_height, frames_decoded_count, frames_presented_count, vsync_counter,
     underflow_count, fma_underflow_count, fma_decoded_since_play, fma_playout_end, has_valid_frame,
 } skip {
-    rom,
+    rom, impeg, impeg_regs, impeg_fw,
 });
 
 opencdi::impl_state!(MpegSystemDemux {

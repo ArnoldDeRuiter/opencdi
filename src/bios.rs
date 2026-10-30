@@ -384,6 +384,19 @@ pub fn inspect(mut data: Vec<u8>) -> BiosImage {
 /// Size of the Digital Video Cartridge ROM (256 KB).
 pub const DVC_ROM_SIZE: usize = 256 * 1024;
 
+/// Checks a cartridge ROM for the Mono-IV board: only the known IMPEG dump fits there.
+pub fn inspect_impeg(data: Vec<u8>) -> BiosImage {
+    let sha = sha1_hex(&data);
+    let (status, known, msg) = match identify(&data) {
+        Some((k, false)) if k.kind == Dvc && k.board == Mono4 => (Status::Ok, Some(k), format!("{}, {}: known good dump", k.model, k.file)),
+        Some((k, _)) if k.kind == Dvc => (Status::Error, Some(k), format!("{} ({}): only the IMPEG cartridge fits the Mono-IV board", k.model, k.file)),
+        Some((k, _)) => (Status::Error, Some(k), format!("this is the {} ROM, not a cartridge ROM", k.model)),
+        None => (Status::Error, None, "unknown cartridge image: only the known IMPEG dump fits the Mono-IV board".into()),
+    };
+    let board = (status == Status::Ok).then_some(Mono4);
+    BiosImage { report: report(status, known, board, false, sha, msg), data }
+}
+
 /// Checks a would-be DVC cartridge ROM; only the known VMPEG dump comes back `Ok`, since only VMPEG is emulated.
 pub fn inspect_dvc(data: Vec<u8>) -> BiosImage {
     let sha = sha1_hex(&data);

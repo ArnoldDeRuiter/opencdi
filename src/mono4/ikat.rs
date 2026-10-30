@@ -83,7 +83,7 @@ impl Ikat {
         self.disc_present = present;
     }
 
-    /// Drive status reply: all zero without a disc, 0x210 with one (the 490 drive constant), 0x20E right after a table of contents request.
+    /// Drive status reply: 0 without a disc, else 0x210, or 0x20E right after a TOC request.
     pub fn drive_report(&mut self) {
         // After a table of contents request the reply carries the transition-end code 0x0E.
         let st: [u8; 2] = match self.disc_present {
@@ -271,9 +271,9 @@ impl Ikat {
             0xF3 => self.respond(2, &[0xA5, 0xF3, 0x4B, 0x4D]),
             0xF6 => self.respond(2, &[0xA5, 0xF6, if self.pal { 0x02 } else { 0x01 }, 0xFF]),
             0xF7 => self.respond(2, &[0xA5, 0xF7, 0x00, 0xFF]),
-            // No reply: the F9 query times out in the BIOS after 100 ticks and reads as "no I2C device".
             // Video encoder query: version 1 gives the same state as no reply without the 100-tick wait.
             0xF9 => self.respond(2, &[0xA5, 0xF9, 0x01]),
+            // Known command without a reply.
             0xFA => {}
             0x80 => self.keyboard_enabled = true,
             // Set-up commands without a reply.

@@ -99,14 +99,14 @@ impl Ciap {
         self.reg(REG_IER) & self.reg(REG_ISR) != 0
     }
 
-    /// Request level, the low three bits of the interrupt control register.
+    /// Request level: the board wires the CIAP request to level 4; the interrupt control register is only stored.
     pub fn level(&self) -> u8 {
-        (self.reg(REG_ICR) & 7) as u8
+        4
     }
 
-    /// Acknowledge vector, the interrupt control register shifted right by three.
+    /// Acknowledge vector: the on-chip vector of the request level.
     pub fn vector(&self) -> u32 {
-        ((self.reg(REG_ICR) >> 3) & 0xFF) as u32
+        0x38 + self.level() as u32
     }
 
     /// Side-effect-free register read for traces and byte merges.
@@ -306,8 +306,10 @@ mod tests {
     #[test]
     fn vector_level_and_clear_on_read() {
         let mut c = Ciap::default();
-        c.write_reg(REG_ICR, 0x01E4, 0);
+        c.write_reg(REG_ICR, 0x0000, 0);
         assert_eq!((c.vector(), c.level()), (0x3C, 4));
+        c.write_reg(REG_ICR, 0x01E4, 0);
+        assert_eq!(c.peek_reg(REG_ICR), 0x01E4);
         c.write_reg(REG_IER, 0x060B, 0);
         c.write_reg(REG_APCR, 0x20, 0);
         assert!(c.irq());

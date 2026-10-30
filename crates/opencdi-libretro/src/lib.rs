@@ -71,7 +71,7 @@ static OPTIONS: Table<[retro_core_option_definition; 3]> = Table([
     retro_core_option_definition {
         key: OPT_MONO4.as_ptr(),
         desc: c"CD-i 490 BIOS, experimental (restart)".as_ptr(),
-        info: c"on also accepts the Mono-IV system ROM (cdi490a.rom) when no Mono-I ROM is found. The 490 board is incomplete: no audio, no Digital Video. Takes effect when content is loaded.".as_ptr(),
+        info: c"on also accepts the Mono-IV system ROM (cdi490a.rom) when no Mono-I ROM is found; with impega.rom present (and the DVC option on auto) the IMPEG Digital Video cartridge is fitted. The 490 board is experimental. Takes effect when content is loaded.".as_ptr(),
         values: option_values(&[(c"off", c"off"), (c"on", c"on")]),
         default_value: c"off".as_ptr(),
     },

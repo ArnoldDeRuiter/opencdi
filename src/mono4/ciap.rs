@@ -33,6 +33,20 @@ pub const BMAN_RESET: u16 = 0x0054;
 const DATA_BUFS: [(u16, usize); 2] = [(0x04, 0x1200), (0x08, 0x1BC2)];
 const DATA_LEN: usize = 2340;
 
+// Header check: BCD time of the sector plus 150, mode 1 or 2, and for mode 2 two equal subheader copies.
+fn header_valid(lba: u32, raw: &[u8; CD_SECTOR_RAW_SIZE]) -> bool {
+    let bcd = |v: u32| (((v / 10) << 4) | (v % 10)) as u8;
+    let f = lba + 150;
+    raw[12..15] == [bcd(f / 4500), bcd(f / 75 % 60), bcd(f % 75)]
+        && (raw[15] == 1 || (raw[15] == 2 && raw[16..20] == raw[20..24]))
+}
+
+// Yellow Book scrambler pattern, generated once.
+fn scramble_table() -> &'static [u8; 2448] {
+    static TABLE: std::sync::OnceLock<[u8; 2448]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(opencdi::cdic::generate_sector_scramble)
+}
+
 pub struct Ciap {
     pub ram: Vec<u8>,
     pub regs: [u16; 64],
@@ -50,13 +64,15 @@ pub struct Ciap {
     pub sectors: u64,
     pub skipped: u64,
     pub dmas: u64,
+    pub byteswap: bool,
+    pub descrambled: u64,
     pub loud: Loud,
     pub trace: bool,
 }
 
 impl Default for Ciap {
     fn default() -> Self {
-        Self { ram: vec![0; WINDOW_SIZE], regs: power_on_regs(), running: false, q_mode: false, lba: 0, drive_active: false, toc: false, toc_index: 0, start_delay: 0, drive_stopped: false, cycles: 0, dma_request: None, seeks: 0, sectors: 0, skipped: 0, dmas: 0, loud: Loud::default(), trace: false }
+        Self { ram: vec![0; WINDOW_SIZE], regs: power_on_regs(), running: false, q_mode: false, lba: 0, drive_active: false, toc: false, toc_index: 0, start_delay: 0, drive_stopped: false, cycles: 0, dma_request: None, seeks: 0, sectors: 0, skipped: 0, dmas: 0, byteswap: false, descrambled: 0, loud: Loud::default(), trace: false }
     }
 }
 
@@ -265,6 +281,26 @@ impl Ciap {
         DATA_BUFS.iter().find(|&&(bit, _)| bman & bit != 0).map(|&(_, at)| at)
     }
 
+    // Byte-swapped images (sync read as FF 00) are swapped back for good; a sector whose header does not check is descrambled if that makes it check.
+    fn repair(&mut self, lba: u32, raw: &mut [u8; CD_SECTOR_RAW_SIZE]) {
+        if raw[0] == 0xFF && raw[1] == 0x00 && !self.byteswap {
+            self.byteswap = true;
+            eprintln!("CIAP disc image is byte-swapped (sector {}); swapping every sector", lba);
+        }
+        if self.byteswap {
+            raw.chunks_exact_mut(2).for_each(|p| p.swap(0, 1));
+        }
+        if !header_valid(lba, raw) {
+            let table = scramble_table();
+            let mut copy = *raw;
+            copy[12..].iter_mut().zip(&table[12..]).for_each(|(b, t)| *b ^= t);
+            if header_valid(lba, &copy) {
+                *raw = copy;
+                self.descrambled += 1;
+            }
+        }
+    }
+
     // Delivers the sector at the drive position into the current data buffer, then advances it; the buffer manager is left to the CPU.
     fn sector(&mut self, cd: &mut CdRom) {
         let lba = self.lba;
@@ -276,6 +312,7 @@ impl Ciap {
             }
             return;
         }
+        self.repair(lba, &mut raw);
         let (file, channel, submode) = (raw[16], raw[17], raw[18]);
         let taken = self.data_buffer().map(|at| self.ram[at..at + DATA_LEN].copy_from_slice(&raw[12..12 + DATA_LEN]));
         let mut flags = if taken.is_some() { ISR_DATA } else { 0 };
@@ -347,7 +384,7 @@ impl Ciap {
     }
 }
 
-opencdi::impl_state!(Ciap { ram, regs, running, q_mode, lba, drive_active, toc, toc_index, start_delay, cycles } skip { drive_stopped, dma_request, seeks, sectors, skipped, dmas, loud, trace });
+opencdi::impl_state!(Ciap { ram, regs, running, q_mode, lba, drive_active, toc, toc_index, start_delay, cycles, byteswap } skip { descrambled, drive_stopped, dma_request, seeks, sectors, skipped, dmas, loud, trace });
 
 #[cfg(test)]
 mod tests {
@@ -418,6 +455,24 @@ mod tests {
         assert_eq!(c.dma_request.take(), Some(0x6906));
         c.dma_done(0x6906, 1024);
         assert_eq!((c.peek_reg(REG_DMACTL), c.dmas), (0x6D06, 1));
+    }
+
+    #[test]
+    fn repair_unswaps_and_descrambles() {
+        let mut good = [0u8; CD_SECTOR_RAW_SIZE];
+        good[1..11].fill(0xFF);
+        good[12..20].copy_from_slice(&[0x00, 0x02, 0x16, 0x02, 0x00, 0x00, 0x09, 0x00]);
+        good[20..24].copy_from_slice(&[0x00, 0x00, 0x09, 0x00]);
+        assert!(header_valid(16, &good));
+        let mut scrambled = good;
+        scrambled[12..].iter_mut().zip(&scramble_table()[12..]).for_each(|(b, t)| *b ^= t);
+        let mut c = Ciap::default();
+        c.repair(16, &mut scrambled);
+        assert_eq!((scrambled, c.descrambled), (good, 1));
+        let mut swapped = good;
+        swapped.chunks_exact_mut(2).for_each(|p| p.swap(0, 1));
+        c.repair(16, &mut swapped);
+        assert!(c.byteswap && swapped == good);
     }
 
     #[test]

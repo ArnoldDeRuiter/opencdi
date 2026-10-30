@@ -262,7 +262,7 @@ impl CdiBus {
         self.slave.notify_disc_swapped();
         if let Some(m) = self.mono4.as_deref_mut() {
             m.ikat.set_disc_present(true);
-            m.ciap.drive_active = false;
+            (m.ciap.drive_active, m.ciap.byteswap) = (false, false);
         }
         Ok(())
     }

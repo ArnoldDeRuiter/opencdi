@@ -66,13 +66,14 @@ pub struct Ciap {
     pub dmas: u64,
     pub byteswap: bool,
     pub descrambled: u64,
+    pub q_reports: u64,
     pub loud: Loud,
     pub trace: bool,
 }
 
 impl Default for Ciap {
     fn default() -> Self {
-        Self { ram: vec![0; WINDOW_SIZE], regs: power_on_regs(), running: false, q_mode: false, lba: 0, drive_active: false, toc: false, toc_index: 0, start_delay: 0, drive_stopped: false, cycles: 0, dma_request: None, seeks: 0, sectors: 0, skipped: 0, dmas: 0, byteswap: false, descrambled: 0, loud: Loud::default(), trace: false }
+        Self { ram: vec![0; WINDOW_SIZE], regs: power_on_regs(), running: false, q_mode: false, lba: 0, drive_active: false, toc: false, toc_index: 0, start_delay: 0, drive_stopped: false, cycles: 0, dma_request: None, seeks: 0, sectors: 0, skipped: 0, dmas: 0, byteswap: false, descrambled: 0, q_reports: 0, loud: Loud::default(), trace: false }
     }
 }
 
@@ -313,6 +314,9 @@ impl Ciap {
             return;
         }
         self.repair(lba, &mut raw);
+        if self.q_mode {
+            self.q_locator(cd, lba);
+        }
         let (file, channel, submode) = (raw[16], raw[17], raw[18]);
         let taken = self.data_buffer().map(|at| self.ram[at..at + DATA_LEN].copy_from_slice(&raw[12..12 + DATA_LEN]));
         let mut flags = if taken.is_some() { ISR_DATA } else { 0 };
@@ -332,6 +336,19 @@ impl Ciap {
             let what = if taken.is_some() { "taken" } else { "skipped" };
             eprintln!("CIAP SECTOR {} file {} channel {} submode {:02X} {} bman {:04X}", lba, file, channel, submode, what, self.reg(REG_BMAN));
         }
+    }
+
+    // Q locator of a delivered sector in the Q-reporting modes: control/ADR, track, index 1, track-relative time, 0, absolute time (LBA plus 150), all BCD; current Q buffer, ISR bit 2.
+    fn q_locator(&mut self, cd: &CdRom, lba: u32) {
+        let bcd = |v: u32| (((v / 10) << 4) | (v % 10)) as u8;
+        let msf = |f: u32| [bcd(f / 4500), bcd(f / 75 % 60), bcd(f % 75)];
+        let t = cd.tracks.iter().rev().find(|t| t.start_lba <= lba);
+        let (ctrl, num, start) = t.map_or((0x41, 1, 0), |t| ((t.control & 0xF0) | 0x01, t.number as u32, t.start_lba));
+        let (r, a) = (msf(lba - start), msf(lba + 150));
+        let at = if self.reg(REG_BMAN) & 0x10 != 0 { 0x1B24 } else { 0x24E6 };
+        self.ram[at..at + 10].copy_from_slice(&[ctrl, bcd(num), 0x01, r[0], r[1], r[2], 0x00, a[0], a[1], a[2]]);
+        self.set(REG_ISR, self.reg(REG_ISR) | 0x0004);
+        self.q_reports += 1;
     }
 
     // One lead-in Q entry per sector period into the current Q buffer (BMAN bit 4: 0x1B24, else 0x24E6): A0 first track and disc type, A1 last track, A2 lead-out, then each track start; repeats.
@@ -384,7 +401,7 @@ impl Ciap {
     }
 }
 
-opencdi::impl_state!(Ciap { ram, regs, running, q_mode, lba, drive_active, toc, toc_index, start_delay, cycles, byteswap } skip { descrambled, drive_stopped, dma_request, seeks, sectors, skipped, dmas, loud, trace });
+opencdi::impl_state!(Ciap { ram, regs, running, q_mode, lba, drive_active, toc, toc_index, start_delay, cycles, byteswap } skip { descrambled, q_reports, drive_stopped, dma_request, seeks, sectors, skipped, dmas, loud, trace });
 
 #[cfg(test)]
 mod tests {

@@ -80,14 +80,9 @@ impl Ikat {
         self.status_polls = 0;
     }
 
-    /// Drive status reply: without a disc all zero; with one, two spin-up replies (0x610, 0x60E), then ready (0x215).
+    /// Drive status reply: all zero without a disc, 0x215 with one.
     pub fn drive_report(&mut self) {
-        let st: [u8; 2] = match (self.disc_present, self.status_polls) {
-            (false, _) => [0x00, 0x00],
-            (true, 0) => [0x06, 0x10],
-            (true, 1) => [0x06, 0x0E],
-            (true, _) => [0x02, 0x15],
-        };
+        let st: [u8; 2] = if self.disc_present { [0x02, 0x15] } else { [0x00, 0x00] };
         if self.disc_present {
             self.status_polls = self.status_polls.saturating_add(1);
         }
@@ -331,8 +326,7 @@ mod tests {
             }
             (0..4).map(|_| k.read(0x0F, 0)).collect::<Vec<u8>>()
         };
-        assert_eq!(status(), [0xB0, 0x00, 0x06, 0x10]);
-        assert_eq!(status(), [0xB0, 0x00, 0x06, 0x0E]);
+        assert_eq!(status(), [0xB0, 0x00, 0x02, 0x15]);
         assert_eq!(status(), [0xB0, 0x00, 0x02, 0x15]);
         for b in [0xE1, 0x00, 0x02, 0x13] {
             k.write(0x07, b, 0);

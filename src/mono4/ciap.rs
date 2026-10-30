@@ -220,6 +220,12 @@ impl Ciap {
         }
     }
 
+    /// A finished DMA: the word address in the control register has advanced past the words moved.
+    pub fn dma_done(&mut self, control: u16, words: u32) {
+        self.set(REG_DMACTL, (control & 0xE000) | (control.wrapping_add(words as u16) & 0x1FFF));
+        self.dmas += 1;
+    }
+
     /// Advances the sector clock; one sector every `CYCLES_PER_SECTOR` while delivery runs and the drive is active.
     pub fn tick(&mut self, cycles: u32, cdrom: &mut Option<CdRom>) {
         self.cycles += cycles;
@@ -326,6 +332,15 @@ mod tests {
         c.write_reg(REG_ASTAT, 0x1234, 0);
         c.write_reg(0x30, 0x1234, 0);
         assert_eq!((c.peek_reg(REG_ID), c.peek_reg(REG_ASTAT), c.peek_reg(0x30)), (CHIP_ID, 0, 0));
+    }
+
+    #[test]
+    fn dma_control_address_advances() {
+        let mut c = Ciap::default();
+        c.write_reg(REG_DMACTL, 0x6906, 0);
+        assert_eq!(c.dma_request.take(), Some(0x6906));
+        c.dma_done(0x6906, 1024);
+        assert_eq!((c.peek_reg(REG_DMACTL), c.dmas), (0x6D06, 1));
     }
 
     #[test]

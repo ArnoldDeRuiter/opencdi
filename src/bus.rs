@@ -467,32 +467,39 @@ impl CdiBus {
         let ch = self.dma.channels[0].clone();
         let (start, count) = (ch.memory_address_counter, ch.transfer_counter as u32);
         let to_mem = (ch.operation_control & 0x80) != 0;
-        let mut dev = (control as usize & 0x1FFF) * 2;
+        let word = (control & 0x1FFF) as u32;
+        // The copy stops at the end of CIAP RAM; the register block is never a DMA target.
+        let words = count.min((ciap::REG_BASE / 2).saturating_sub(word));
         if self.taps.ciap {
             eprintln!("CIAP DMA control {:04X} memory {:06X} words {} {}", control, start, count, if to_mem { "to memory" } else { "from memory" });
         }
-        for i in 0..count {
-            let mem = start.wrapping_add(i * 2);
+        if words < count {
+            if let Some(m) = self.mono4.as_deref_mut() {
+                if m.ciap.loud.first(0x3_0000) {
+                    eprintln!("CIAP DMA control {:04X} words {} runs past CIAP RAM, {} copied pc~{:06X}", control, count, words, self.current_pc);
+                }
+            }
+        }
+        for i in 0..words {
+            let (mem, dev) = (start.wrapping_add(i * 2), ((word + i) * 2) as usize);
             for k in 0..2 {
-                let d = (dev + k) % ciap::WINDOW_SIZE;
                 if to_mem {
-                    let b = self.mono4.as_deref().map_or(0xFF, |m| m.ciap.ram[d]);
-                    self.write_byte(mem + k as u32, b);
+                    let b = self.mono4.as_deref().map_or(0xFF, |m| m.ciap.ram[dev + k]);
+                    self.write_byte(mem.wrapping_add(k as u32), b);
                 } else {
-                    let b = self.read_byte(mem + k as u32);
+                    let b = self.read_byte(mem.wrapping_add(k as u32));
                     if let Some(m) = self.mono4.as_deref_mut() {
-                        m.ciap.ram[d] = b;
+                        m.ciap.ram[dev + k] = b;
                     }
                 }
             }
-            dev = (dev + 2) % ciap::WINDOW_SIZE;
         }
         let ch = &mut self.dma.channels[0];
         ch.memory_address_counter = start.wrapping_add(count * 2);
         ch.transfer_counter = 0;
         ch.channel_status |= 0x80;
         if let Some(m) = self.mono4.as_deref_mut() {
-            m.ciap.dmas += 1;
+            m.ciap.dma_done(control, words);
         }
     }
 

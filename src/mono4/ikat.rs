@@ -35,6 +35,7 @@ pub struct Ikat {
     pub status_polls: u8, // drive status polls answered since the disc appeared
     pub drive_busy: bool, // drive seeking or reading; set by the bus before each write
     pub drive_event: Option<DriveEvent>,
+    pub reset_request: bool,
     pub toc_reply: bool, // a C0 is waiting for its transition-end status reply
     pub pointer: (i32, i32, u8), // host pointer: x 0..767, y 0..559, buttons (1, 2, 4 = third button)
     pub loud: Loud,
@@ -53,6 +54,7 @@ impl Default for Ikat {
             status_polls: 0,
             drive_busy: false,
             drive_event: None,
+            reset_request: false,
             toc_reply: false,
             pointer: (384, 280, 0),
             loud: Loud::default(),
@@ -281,9 +283,11 @@ impl Ikat {
             // Set-up commands without a reply.
             0x84..=0x86 | 0x8F => {}
             0x8C..=0x8E => self.arm_b(c),
+            // System reset request: the board resets the player as after power-on, RAM kept.
             0x88 => {
-                if self.loud.first(0x2_0000 | c as u32) {
-                    eprintln!("IKAT system reset request (port C 88), not modelled pc~{:06X}", pc);
+                self.reset_request = true;
+                if self.trace || self.loud.first(0x2_0000 | c as u32) {
+                    eprintln!("IKAT system reset request (port C 88) pc~{:06X}", pc);
                 }
             }
             _ => {
@@ -334,7 +338,7 @@ impl Ikat {
 }
 
 opencdi::impl_state!(Port { cmd, reply, len } skip {});
-opencdi::impl_state!(Ikat { mode, imr, ports, keyboard_enabled, pal, disc_present, status_polls, pointer, toc_reply } skip { drive_busy, drive_event, loud, trace });
+opencdi::impl_state!(Ikat { mode, imr, ports, keyboard_enabled, pal, disc_present, status_polls, pointer, toc_reply, reset_request } skip { drive_busy, drive_event, loud, trace });
 
 #[cfg(test)]
 mod tests {

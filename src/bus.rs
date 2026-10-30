@@ -362,7 +362,7 @@ impl CdiBus {
     pub fn board_reset_request(&self) -> bool {
         match self.board {
             BoardKind::Mono1 => self.slave.reset_request,
-            BoardKind::Mono4 => false,
+            BoardKind::Mono4 => self.mono4.as_deref().is_some_and(|m| m.ikat.reset_request),
         }
     }
 

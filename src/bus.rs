@@ -1112,6 +1112,10 @@ impl CdiBus {
                 return m.ciap.read_reg(off - ciap::REG_BASE, self.current_pc);
             }
         }
+        // IKAT drives only the low byte lane; the high byte of a word access floats high.
+        if let (0x310000..=0x31FFFE, Some(m)) = (addr, self.mono4.as_deref_mut()) {
+            return 0xFF00 | m.ikat.read(addr + 1 - 0x310000, self.current_pc) as u16;
+        }
         let hi = self.rd8(address) as u16;
         let lo = self.rd8(address.wrapping_add(1)) as u16;
         (hi << 8) | lo
@@ -1163,6 +1167,9 @@ impl CdiBus {
                 return;
             }
         }
+        if (0x310000..=0x31FFFE).contains(&addr) && self.mono4.is_some() {
+            return self.wr8(address.wrapping_add(1), value as u8);
+        }
         self.wr8(address, (value >> 8) as u8);
         self.wr8(address.wrapping_add(1), value as u8);
     }
@@ -1181,7 +1188,8 @@ impl CdiBus {
         if m.ciap.irq() && level == m.ciap.level() {
             return Some(m.ciap.vector());
         }
-        (level == 2).then_some(0x1A)
+        // Level 2 only for an IKAT request; anything else falls back to the spurious autovector.
+        (level == 2 && m.ikat.irq()).then_some(0x1A)
     }
 
     fn iack(&mut self, level: u8) -> u32 {

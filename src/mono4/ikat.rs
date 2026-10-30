@@ -259,7 +259,12 @@ impl Ikat {
                 self.drive_event = Some(DriveEvent::Seek(frames.saturating_sub(150)));
             }
             0xC2 | 0xC3 => self.drive_event = Some(DriveEvent::Stop),
-            0xA2 | 0xA6 | 0xA7 | 0xC0 | 0xC1 | 0xC4 | 0xC5 => {}
+            // Accepted without reply or effect; logged once so a run shows they arrived.
+            0xA2 | 0xA6 | 0xA7 | 0xC0 | 0xC1 | 0xC4 | 0xC5 => {
+                if self.loud.first(0x3_0000 | cmd[0] as u32) {
+                    eprintln!("IKAT port D command {} accepted, no effect modelled pc~{:06X}", hex(cmd), pc);
+                }
+            }
             c => {
                 if self.loud.first(0x3_0000 | c as u32) {
                     eprintln!("IKAT unmodelled port D command {} pc~{:06X}", hex(cmd), pc);

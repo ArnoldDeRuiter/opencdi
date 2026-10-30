@@ -469,6 +469,14 @@ impl CdiBus {
         }
     }
 
+    // Mono-IV: a channel 0 start marks the channel active; the complete bit comes when the CIAP copy ends.
+    fn mono4_dma_start(&mut self, offset: u32, value: u16) {
+        if self.board == BoardKind::Mono4 && offset == 0x06 && value & 0x80 != 0 {
+            let ch = &mut self.dma.channels[0];
+            ch.channel_status = (ch.channel_status & !0x80) | 0x08;
+        }
+    }
+
     /// One-shot CIAP copy on DMA channel 0: the low 13 bits of `control` are the CIAP word address, the channel gives memory address, word count and direction.
     pub fn perform_ciap_dma(&mut self, control: u16) {
         let ch = self.dma.channels[0].clone();
@@ -504,7 +512,7 @@ impl CdiBus {
         let ch = &mut self.dma.channels[0];
         ch.memory_address_counter = start.wrapping_add(count * 2);
         ch.transfer_counter = 0;
-        ch.channel_status |= 0x80;
+        ch.channel_status = (ch.channel_status & !0x08) | 0x80;
         if let Some(m) = self.mono4.as_deref_mut() {
             m.ciap.dma_done(control, words);
         }
@@ -847,6 +855,7 @@ impl CdiBus {
                     };
                     trace!("DMA BYTE WRITE: reg=0x{:04X}, offset=0x{:02X}, new_val=0x{:04X} at PC=0x{:06X}", reg, offset, new_val, self.current_pc);
                     self.dma.write_reg(offset, new_val);
+                    self.mono4_dma_start(offset, new_val);
                     if offset >= 0x40 && self.dvc_dma_requested() {
                         self.perform_dvc_dma();
                     }
@@ -977,6 +986,7 @@ impl CdiBus {
                 let offset = (reg - 0x4000) & !1;
                 trace!("DMA REG WRITE: offset 0x{:02X} = 0x{:04X} at PC=0x{:06X}", offset, value, self.current_pc);
                 self.dma.write_reg(offset, value);
+                self.mono4_dma_start(offset, value);
                 if offset >= 0x40 && self.dvc_dma_requested() {
                     self.perform_dvc_dma();
                 }

@@ -40,6 +40,8 @@ pub struct Ciap {
     pub q_mode: bool,
     pub lba: u32,
     pub drive_active: bool,
+    pub toc: bool, // table of contents read: Q reports carry lead-in entries
+    pub toc_index: usize,
     pub start_delay: u8, // sector periods after a seek before the first sector
     pub drive_stopped: bool, // the drive stopped because delivery was off; the board reports it
     pub cycles: u32,
@@ -54,7 +56,7 @@ pub struct Ciap {
 
 impl Default for Ciap {
     fn default() -> Self {
-        Self { ram: vec![0; WINDOW_SIZE], regs: power_on_regs(), running: false, q_mode: false, lba: 0, drive_active: false, start_delay: 0, drive_stopped: false, cycles: 0, dma_request: None, seeks: 0, sectors: 0, skipped: 0, dmas: 0, loud: Loud::default(), trace: false }
+        Self { ram: vec![0; WINDOW_SIZE], regs: power_on_regs(), running: false, q_mode: false, lba: 0, drive_active: false, toc: false, toc_index: 0, start_delay: 0, drive_stopped: false, cycles: 0, dma_request: None, seeks: 0, sectors: 0, skipped: 0, dmas: 0, loud: Loud::default(), trace: false }
     }
 }
 
@@ -75,10 +77,11 @@ impl Ciap {
     pub fn drive(&mut self, ev: super::ikat::DriveEvent) {
         match ev {
             super::ikat::DriveEvent::Seek(lba) => {
-                (self.lba, self.drive_active, self.start_delay) = (lba, true, 1);
+                (self.lba, self.drive_active, self.start_delay, self.toc) = (lba, true, 1, false);
                 self.seeks += 1;
             }
-            super::ikat::DriveEvent::Stop => self.drive_active = false,
+            super::ikat::DriveEvent::Stop => (self.drive_active, self.toc) = (false, false),
+            super::ikat::DriveEvent::Toc => (self.toc, self.toc_index) = (true, 0),
         }
         if self.trace {
             eprintln!("CIAP DRIVE {:?}", ev);
@@ -234,6 +237,12 @@ impl Ciap {
         self.cycles += cycles;
         while self.cycles >= opencdi::cdic::CYCLES_PER_SECTOR {
             self.cycles -= opencdi::cdic::CYCLES_PER_SECTOR;
+            if self.toc && self.running && self.q_mode {
+                if let Some(cd) = cdrom.as_ref() {
+                    self.toc_entry(cd);
+                }
+                continue;
+            }
             if !self.drive_active {
                 continue;
             }
@@ -288,6 +297,32 @@ impl Ciap {
         }
     }
 
+    // One lead-in Q entry per sector period into the current Q buffer (BMAN bit 4: 0x1B24, else 0x24E6): A0 first track and disc type, A1 last track, A2 lead-out, then each track start; repeats.
+    fn toc_entry(&mut self, cd: &CdRom) {
+        let bcd = |v: u32| (((v / 10) << 4) | (v % 10)) as u8;
+        let msf = |lba: u32| { let f = lba + 150; [bcd(f / 4500), bcd(f / 75 % 60), bcd(f % 75)] };
+        let tracks = &cd.tracks;
+        let (first, last) = (tracks.first().map_or(1, |t| t.number), tracks.last().map_or(1, |t| t.number));
+        let ctrl = |c: u8| (c & 0xF0) | 0x01;
+        let i = self.toc_index % (3 + tracks.len());
+        self.toc_index += 1;
+        let (c, point, p) = match i {
+            0 => (ctrl(tracks.first().map_or(0x41, |t| t.control)), 0xA0, [bcd(first as u32), cd.disc_type, 0]),
+            1 => (ctrl(tracks.last().map_or(0x41, |t| t.control)), 0xA1, [bcd(last as u32), 0, 0]),
+            2 => (0x41, 0xA2, msf(cd.total_sectors)),
+            n => {
+                let t = &tracks[n - 3];
+                (ctrl(t.control), bcd(t.number as u32), msf(t.start_lba))
+            }
+        };
+        let at = if self.reg(REG_BMAN) & 0x10 != 0 { 0x1B24 } else { 0x24E6 };
+        self.ram[at..at + 10].copy_from_slice(&[c, 0x00, point, 0, 0, 0, 0, p[0], p[1], p[2]]);
+        self.set(REG_ISR, self.reg(REG_ISR) | 0x0004);
+        if self.trace {
+            eprintln!("CIAP TOC point {:02X} {:02X} {:02X} {:02X} at {:04X}", point, p[0], p[1], p[2], at);
+        }
+    }
+
     // Commands: 0x94, 0xC4, 0x44 and 0x80 start delivery, 0x100 stops it; Q reporting with 0x10, 0x44 and 0x94, not with 0xC4.
     fn command(&mut self, v: u16, pc: u32) {
         match v {
@@ -312,7 +347,7 @@ impl Ciap {
     }
 }
 
-opencdi::impl_state!(Ciap { ram, regs, running, q_mode, lba, drive_active, start_delay, cycles } skip { drive_stopped, dma_request, seeks, sectors, skipped, dmas, loud, trace });
+opencdi::impl_state!(Ciap { ram, regs, running, q_mode, lba, drive_active, toc, toc_index, start_delay, cycles } skip { drive_stopped, dma_request, seeks, sectors, skipped, dmas, loud, trace });
 
 #[cfg(test)]
 mod tests {

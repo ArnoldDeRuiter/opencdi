@@ -86,13 +86,13 @@ impl Ikat {
         self.status_polls = 0;
     }
 
-    /// Drive status reply: all zero without a disc, 0x215 with one, 0x20E right after a table of contents request.
+    /// Drive status reply: all zero without a disc, 0x210 with one (the 490 drive constant), 0x20E right after a table of contents request.
     pub fn drive_report(&mut self) {
         // After a table of contents request the reply carries the transition-end code 0x0E.
         let st: [u8; 2] = match self.disc_present {
             false => [0x00, 0x00],
             true if std::mem::take(&mut self.toc_reply) => [0x02, 0x0E],
-            true => [0x02, 0x15],
+            true => [0x02, 0x10],
         };
         if self.disc_present {
             self.status_polls = self.status_polls.saturating_add(1);
@@ -429,8 +429,8 @@ mod tests {
             }
             (0..4).map(|_| k.read(0x0F, 0)).collect::<Vec<u8>>()
         };
-        assert_eq!(status(), [0xB0, 0x00, 0x02, 0x15]);
-        assert_eq!(status(), [0xB0, 0x00, 0x02, 0x15]);
+        assert_eq!(status(), [0xB0, 0x00, 0x02, 0x10]);
+        assert_eq!(status(), [0xB0, 0x00, 0x02, 0x10]);
         for b in [0xE1, 0x00, 0x02, 0x13] {
             k.write(0x07, b, 0);
         }

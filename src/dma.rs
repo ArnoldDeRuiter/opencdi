@@ -61,9 +61,9 @@ impl SccDma {
             0x06 => {
                 ch.sequence_control = (val >> 8) as u8;
                 ch.channel_control = (val & 0x7F) as u8;
-                // If software operation bit set, flag complete
+                // Start: channel active (CA); the device sets complete (COC) when the transfer ends.
                 if (val & 0x80) != 0 {
-                    ch.channel_status |= 0x80;
+                    ch.channel_status = (ch.channel_status & !0x80) | 0x08;
                 }
             }
             0x0A => {

@@ -459,7 +459,7 @@ impl CdiBus {
             self.dvc.demux.video.len(), self.dvc.demux.audio.len(), self.dvc.fma_demux.audio.len(), self.dvc.video_decoder.is_some(), self.dvc.frames_decoded_count);
         self.dma.channels[1].memory_address_counter = start.wrapping_add(count * 2);
         self.dma.channels[1].transfer_counter = 0;
-        self.dma.channels[1].channel_status |= 0x80;
+        self.dma.channels[1].channel_status = (self.dma.channels[1].channel_status & !0x08) | 0x80;
         if self.dvc.transfer_for_fma {
             let cmd = self.dvc.get_fma_word(crate::dvc::FMA_CMD) & !0x8000;
             self.dvc.set_fma_word(crate::dvc::FMA_CMD, cmd);
@@ -558,7 +558,7 @@ impl CdiBus {
 
         self.dma.channels[0].memory_address_counter = (start + count * 2) as u32;
         self.dma.channels[0].transfer_counter = 0;
-        self.dma.channels[0].channel_status |= 0x80; // COC (Channel Operation Complete)
+        self.dma.channels[0].channel_status = (self.dma.channels[0].channel_status & !0x08) | 0x80; // COC set, CA cleared
         self.cdic.dma_triggered = false;
     }
 }

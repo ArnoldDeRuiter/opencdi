@@ -99,6 +99,7 @@ impl Machine {
         self.cpu.set_cpu_type(CpuType::SCC68070);
         self.cpu.reset(&mut self.bus);
         self.bus.emulate_wait_states = true;
+        self.bus.counters.halted = false;
     }
 
     pub fn framebuffer(&self) -> &[u32] {
@@ -188,6 +189,7 @@ impl Machine {
                 if bus.board_reset_request() {
                     bus.player_reset();
                     cpu.reset(bus);
+                    bus.counters.halted = false;
                 }
                 cpu.set_irq(highest_ipl(bus));
             }
@@ -274,6 +276,7 @@ impl Machine {
             let _ = self.load(&mut Reader::new(&backup));
             return Err(e);
         }
+        self.bus.counters.halted = false;
         Ok(frontend)
     }
 }

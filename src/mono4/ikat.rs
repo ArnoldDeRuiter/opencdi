@@ -32,7 +32,6 @@ pub struct Ikat {
     pub keyboard_enabled: bool, // port C 80: key events on port C (not modelled yet)
     pub pal: bool, // video standard reported by the identification reply; set by the bus before each write
     pub disc_present: bool,
-    pub status_polls: u8, // drive status polls answered since the disc appeared
     pub drive_busy: bool, // drive seeking or reading; set by the bus before each write
     pub drive_event: Option<DriveEvent>,
     pub reset_request: bool,
@@ -51,7 +50,6 @@ impl Default for Ikat {
             keyboard_enabled: false,
             pal: true,
             disc_present: false,
-            status_polls: 0,
             drive_busy: false,
             drive_event: None,
             reset_request: false,
@@ -80,10 +78,9 @@ impl Ikat {
         *self = Self { pal, trace, disc_present, pointer, loud, ..Self::default() };
     }
 
-    /// Disc inserted or removed; the status replies restart their spin-up sequence.
+    /// Disc inserted or removed.
     pub fn set_disc_present(&mut self, present: bool) {
         self.disc_present = present;
-        self.status_polls = 0;
     }
 
     /// Drive status reply: all zero without a disc, 0x210 with one (the 490 drive constant), 0x20E right after a table of contents request.
@@ -94,9 +91,6 @@ impl Ikat {
             true if std::mem::take(&mut self.toc_reply) => [0x02, 0x0E],
             true => [0x02, 0x10],
         };
-        if self.disc_present {
-            self.status_polls = self.status_polls.saturating_add(1);
-        }
         self.respond(3, &[0xB0, 0x00, st[0], st[1]]);
     }
 
@@ -340,7 +334,7 @@ impl Ikat {
 }
 
 opencdi::impl_state!(Port { cmd, reply, len } skip {});
-opencdi::impl_state!(Ikat { mode, imr, ports, keyboard_enabled, pal, disc_present, status_polls, pointer, toc_reply, reset_request } skip { drive_busy, drive_event, loud, trace });
+opencdi::impl_state!(Ikat { mode, imr, ports, keyboard_enabled, pal, disc_present, pointer, toc_reply, reset_request } skip { drive_busy, drive_event, loud, trace });
 
 #[cfg(test)]
 mod tests {

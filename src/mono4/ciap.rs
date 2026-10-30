@@ -91,6 +91,7 @@ impl Ciap {
         self.regs = power_on_regs();
         (self.running, self.q_mode, self.lba, self.drive_active) = (false, false, 0, false);
         (self.start_delay, self.drive_stopped, self.toc, self.toc_index) = (0, false, false, 0);
+        (self.dma_request, self.cycles) = (None, 0);
     }
 
     /// Drive request from IKAT port D: a seek positions the next sector and starts the drive, a stop halts delivery.
@@ -102,7 +103,10 @@ impl Ciap {
             }
             super::ikat::DriveEvent::Stop => (self.drive_active, self.toc) = (false, false),
             // A table of contents read ends any running data read.
-            super::ikat::DriveEvent::Toc => (self.toc, self.toc_index, self.drive_active) = (true, 0, false),
+            super::ikat::DriveEvent::Toc => {
+                (self.toc, self.toc_index, self.drive_active) = (true, 0, false);
+                (self.start_delay, self.drive_stopped) = (0, false);
+            }
         }
         if self.trace {
             eprintln!("CIAP DRIVE {:?}", ev);

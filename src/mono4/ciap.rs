@@ -23,17 +23,15 @@ pub const CHIP_ID: u16 = 0xCD02;
 const STORED: &[u32] = &[0x08, 0x0A, 0x0C, 0x0E, 0x10, 0x12, 0x1A, 0x20, 0x22, 0x24, 0x28, 0x34, 0x7E];
 
 pub const ISR_DATA: u16 = 0x0001;
-pub const ISR_AUDIO: u16 = 0x0002;
 pub const ISR_AUDIO_EVENT: u16 = 0x0008;
 pub const ISR_TRIGGER: u16 = 0x0200;
 pub const ISR_EOF: u16 = 0x0400;
-const REG_TACS: u32 = 0x08;
+/// Buffer manager at power-on: data buffer 0, Q buffer 0 and subcode buffer 0 current, no audio buffer queued.
+pub const BMAN_RESET: u16 = 0x0054;
 
-// Buffers in CIAP RAM and their buffer-manager bits: audio 0/1, data 2/3.
-const AUDIO_BUFS: [(u16, usize); 2] = [(0x01, 0x0000), (0x02, 0x0900)];
+// Data buffers in CIAP RAM and their buffer-manager bits; the set bit names the buffer the chip fills.
 const DATA_BUFS: [(u16, usize); 2] = [(0x04, 0x1200), (0x08, 0x1BC2)];
 const DATA_LEN: usize = 2340;
-const AUDIO_LEN: usize = 2304;
 
 pub struct Ciap {
     pub ram: Vec<u8>,
@@ -54,13 +52,19 @@ pub struct Ciap {
 
 impl Default for Ciap {
     fn default() -> Self {
-        Self { ram: vec![0; WINDOW_SIZE], regs: [0; 64], running: false, q_mode: false, lba: 0, drive_active: false, cycles: 0, dma_request: None, seeks: 0, sectors: 0, skipped: 0, dmas: 0, loud: Loud::default(), trace: false }
+        Self { ram: vec![0; WINDOW_SIZE], regs: power_on_regs(), running: false, q_mode: false, lba: 0, drive_active: false, cycles: 0, dma_request: None, seeks: 0, sectors: 0, skipped: 0, dmas: 0, loud: Loud::default(), trace: false }
     }
+}
+
+fn power_on_regs() -> [u16; 64] {
+    let mut regs = [0; 64];
+    regs[(REG_BMAN >> 1) as usize] = BMAN_RESET;
+    regs
 }
 
 impl Ciap {
     pub fn reset(&mut self) {
-        self.regs = [0; 64];
+        self.regs = power_on_regs();
         (self.running, self.q_mode, self.lba, self.drive_active) = (false, false, 0, false);
     }
 
@@ -146,8 +150,8 @@ impl Ciap {
         }
         match reg {
             REG_IER | REG_ICR | REG_TEST => self.set(reg, value),
-            // A written 1 hands the buffer back to the chip.
-            REG_BMAN => self.set(REG_BMAN, self.reg(REG_BMAN) & !value),
+            // A written 1 toggles the bit: swaps a data or Q pair, queues a CPU-filled audio buffer.
+            REG_BMAN => self.set(REG_BMAN, self.reg(REG_BMAN) ^ value),
             REG_CCR => {
                 self.set(REG_CCR, value);
                 self.command(value, pc);
@@ -229,19 +233,13 @@ impl Ciap {
         }
     }
 
-    // Lowest buffer whose manager bit is clear.
-    fn free_buffer(&self, bufs: &[(u16, usize); 2]) -> Option<(u16, usize)> {
+    // Current data buffer: buffer 0 when its bit is set, else buffer 1 when its bit is set.
+    fn data_buffer(&self) -> Option<usize> {
         let bman = self.reg(REG_BMAN);
-        bufs.iter().copied().find(|&(bit, _)| bman & bit == 0)
+        DATA_BUFS.iter().find(|&&(bit, _)| bman & bit != 0).map(|&(_, at)| at)
     }
 
-    fn fill(&mut self, buf: (u16, usize), src: &[u8], isr: u16) {
-        self.ram[buf.1..buf.1 + src.len()].copy_from_slice(src);
-        self.set(REG_BMAN, self.reg(REG_BMAN) | buf.0);
-        self.set(REG_ISR, self.reg(REG_ISR) | isr);
-    }
-
-    // Delivers the sector at the drive position, then advances it; the drive keeps moving when buffers are full.
+    // Delivers the sector at the drive position into the current data buffer, then advances it; the buffer manager is left to the CPU.
     fn sector(&mut self, cd: &mut CdRom) {
         let lba = self.lba;
         self.lba += 1;
@@ -253,15 +251,8 @@ impl Ciap {
             return;
         }
         let (file, channel, submode) = (raw[16], raw[17], raw[18]);
-        let audio = submode & 0x04 != 0;
-        let taken = if !audio {
-            self.free_buffer(&DATA_BUFS).map(|b| self.fill(b, &raw[12..12 + DATA_LEN], ISR_DATA))
-        } else if submode & 0x20 != 0 && self.reg(REG_TACS) & (1 << (channel & 15)) != 0 {
-            self.free_buffer(&AUDIO_BUFS).map(|b| self.fill(b, &raw[24..24 + AUDIO_LEN], ISR_AUDIO))
-        } else {
-            None
-        };
-        let mut flags = 0;
+        let taken = self.data_buffer().map(|at| self.ram[at..at + DATA_LEN].copy_from_slice(&raw[12..12 + DATA_LEN]));
+        let mut flags = if taken.is_some() { ISR_DATA } else { 0 };
         if submode & 0x10 != 0 {
             flags |= ISR_TRIGGER;
         }
@@ -335,5 +326,20 @@ mod tests {
         c.write_reg(REG_ASTAT, 0x1234, 0);
         c.write_reg(0x30, 0x1234, 0);
         assert_eq!((c.peek_reg(REG_ID), c.peek_reg(REG_ASTAT), c.peek_reg(0x30)), (CHIP_ID, 0, 0));
+    }
+
+    #[test]
+    fn buffer_manager_toggles_on_write() {
+        let mut c = Ciap::default();
+        assert_eq!(c.peek_reg(REG_BMAN), BMAN_RESET);
+        assert_eq!(c.data_buffer(), Some(0x1200));
+        c.write_reg(REG_BMAN, 0x0C, 0);
+        assert_eq!((c.peek_reg(REG_BMAN), c.data_buffer()), (0x0058, Some(0x1BC2)));
+        c.write_reg(REG_BMAN, 0x0C, 0);
+        assert_eq!(c.data_buffer(), Some(0x1200));
+        c.write_reg(REG_BMAN, 0x01, 0);
+        assert_eq!(c.peek_reg(REG_BMAN) & 0x03, 0x01);
+        c.reset();
+        assert_eq!(c.peek_reg(REG_BMAN), BMAN_RESET);
     }
 }

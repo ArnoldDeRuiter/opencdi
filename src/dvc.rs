@@ -404,7 +404,7 @@ pub struct Dvc {
     pub fma_regs: Box<[u8; 256]>,
     pub fmv_regs: Box<[u8; 256]>,
     pub impeg: bool, // IMPEG cartridge on the Mono-IV board: extra register windows below
-    pub impeg_regs: Vec<u8>, // 0xE04100-0xE043FF on IMPEG (data port and audio block)
+    pub impeg_regs: Box<[u8; 0x300]>, // 0xE04100-0xE043FF on IMPEG (data port and audio block); fixed size, so a state cannot load it short
     pub impeg_fw: Vec<u8>, // 0xE04800-0xE07FFF on IMPEG: firmware windows, plain RAM, never run (not saved: nothing reads it back)
     pub impeg_pio: bool, // IMPEG audio fed by programmed I/O
     pub impeg_hi_valid: bool, // the high byte of the next data-port word has been written
@@ -491,7 +491,7 @@ impl Dvc {
             fma_regs: vec![0u8; 256].into_boxed_slice().try_into().unwrap(),
             fmv_regs: vec![0u8; 256].into_boxed_slice().try_into().unwrap(),
             impeg: false,
-            impeg_regs: vec![0; 0x300],
+            impeg_regs: Box::new([0; 0x300]),
             impeg_fw: vec![0; 0x3800],
             impeg_pio: false,
             impeg_hi_valid: false,
@@ -900,6 +900,9 @@ impl Dvc {
                 let pio = w & 0x0100 != 0;
                 if self.impeg_pio && !pio {
                     self.process_stream();
+                }
+                if pio != self.impeg_pio {
+                    self.impeg_hi_valid = false;
                 }
                 self.impeg_pio = pio;
                 self.set_fma_word(r, w & !0x0100);

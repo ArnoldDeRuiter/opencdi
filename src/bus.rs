@@ -34,6 +34,7 @@ pub enum BoardKind {
 pub struct CdiBus {
     pub board: BoardKind,
     pub mono4: Option<Box<Mono4>>, // Some exactly when `board` is Mono4
+    pub onchip_loud: opencdi::mono4::Loud, // unmodelled on-chip registers, reported once
     pub mono4_bus_errors: bool, // Mono-IV: unmapped data accesses raise a bus error; debug switch CDI_MONO4_BUSERR=0 reads 0xFF instead
     pub rom: Box<[u8; 512 * 1024]>,
     pub sys_ram: Box<[u8; 512 * 1024]>,
@@ -74,6 +75,7 @@ impl CdiBus {
         Self {
             board: BoardKind::Mono1,
             mono4: None,
+            onchip_loud: opencdi::mono4::Loud::default(),
             mono4_bus_errors: std::env::var_os("CDI_MONO4_BUSERR").is_none_or(|v| v != "0"),
             rom: vec![0u8; 512 * 1024].into_boxed_slice().try_into().unwrap(),
             sys_ram: vec![0u8; 512 * 1024].into_boxed_slice().try_into().unwrap(),
@@ -589,6 +591,14 @@ impl CdiBus {
 
                 // MMU Status/Control
                 0x8000..=0x80FF => 0x00,
+
+                // I2C controller: not modelled, reads 0 (reported once).
+                0x2001..=0x2009 => {
+                    if self.onchip_loud.first(reg) {
+                        eprintln!("SCC68070 I2C register {:04X} read, not modelled (0x00) pc~{:06X}", reg, self.current_pc);
+                    }
+                    0x00
+                }
 
                 _ => 0x00,
             };
@@ -1458,5 +1468,5 @@ opencdi::impl_state!(CdiBus {
     mono4, sys_ram, dvc, cdic, dma, mcd212, nvram, slave, shared_in4_owner, scc_timer, scc_uart_cmd, scc_uart_tx_irq,
     current_pc, wait_cycles, current_line_cycle, emulate_wait_states, current_frame,
 } skip {
-    board, mono4_bus_errors, rom, cdrom, uart_capture, dvc_audio_capture, trace_setup, watch_addr1, watch_addr2, watch_enabled, trace_fmv, taps, counters,
+    board, onchip_loud, mono4_bus_errors, rom, cdrom, uart_capture, dvc_audio_capture, trace_setup, watch_addr1, watch_addr2, watch_enabled, trace_fmv, taps, counters,
 });

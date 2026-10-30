@@ -14,6 +14,7 @@ const STATUS_REPLY: u8 = 0x01;
 pub struct Port {
     pub cmd: Vec<u8>,
     pub reply: VecDeque<u8>,
+    pub len: usize, // length of the frame collected in `cmd`, set by its first byte or by arming from another port
 }
 
 /// Drive request from a port D command, applied to the CIAP by the board.
@@ -125,16 +126,28 @@ impl Ikat {
         self.pending() & self.imr != 0
     }
 
-    // Command length from the port and its first byte; unknown commands are one byte.
+    // Frame length from the port and its first byte; unknown commands are one byte.
     fn command_length(port: usize, first: u8) -> usize {
         match (port, first) {
-            (0, 0x80 | 0x81) => 3,
-            (1, 0x90) => 16,
-            (1, 0x96) => 8,
-            (1, 0x9A) => 6,
-            (3, b) if b & 0x80 != 0 => 4,
+            (0, 0x80 | 0x81) => 4,
+            (1, 0x8D) => 2,
+            (3, 0x91..=0x93 | 0xA1 | 0xA2 | 0xA4 | 0xA6 | 0xA7 | 0xB0..=0xB2 | 0xC0..=0xC5 | 0xE0 | 0xE1) => 4,
             _ => 1,
         }
+    }
+
+    // Port A 90/96/9A and port C 8D make port B collect a frame for that command; 8C and 8E end it.
+    fn arm_b(&mut self, c: u8) {
+        let data = match c {
+            0x90 => 16,
+            0x96 => 8,
+            0x9A => 6,
+            0x8D => 1,
+            _ => 0,
+        };
+        let b = &mut self.ports[1];
+        b.cmd = if data == 0 { Vec::new() } else { vec![c] };
+        b.len = 1 + data;
     }
 
     /// Side-effect-free register read for traces.
@@ -175,10 +188,13 @@ impl Ikat {
             0x01 | 0x03 | 0x05 | 0x07 => {
                 let p = ((reg - 0x01) >> 1) as usize;
                 let irq = self.irq();
-                self.ports[p].cmd.push(value);
-                let cmd = &self.ports[p].cmd;
-                if cmd.len() >= Self::command_length(p, cmd[0]) {
-                    let cmd = std::mem::take(&mut self.ports[p].cmd);
+                let port = &mut self.ports[p];
+                if port.cmd.is_empty() {
+                    port.len = Self::command_length(p, value);
+                }
+                port.cmd.push(value);
+                if port.cmd.len() >= port.len {
+                    let cmd = std::mem::take(&mut port.cmd);
                     if self.trace {
                         eprintln!("IKAT PORT {} <= {} pc~{:06X}", PORT_NAMES[p], hex(&cmd), pc);
                     }
@@ -222,10 +238,24 @@ impl Ikat {
     }
 
     fn execute(&mut self, port: usize, cmd: &[u8], pc: u32) {
-        match port {
-            2 => self.execute_c(cmd[0], pc),
-            3 => self.execute_d(cmd, pc),
-            _ => {}
+        match (port, cmd[0]) {
+            // Display set-up frames from the boot code; no reply.
+            (0, 0x80 | 0x81) => {}
+            (0, 0x90 | 0x96 | 0x9A) => self.arm_b(cmd[0]),
+            // Front-panel text (9A: three characters as 16-bit segment patterns, low byte first) and the other display frames.
+            (1, 0x90 | 0x96 | 0x9A) => {}
+            // Port B loopback test: echo the data byte and stay armed.
+            (1, 0x8D) => {
+                self.respond(1, &[cmd[1]]);
+                self.arm_b(0x8D);
+            }
+            (2, _) => self.execute_c(cmd[0], pc),
+            (3, _) => self.execute_d(cmd, pc),
+            _ => {
+                if self.loud.first(((port as u32 + 4) << 16) | cmd[0] as u32) {
+                    eprintln!("IKAT unmodelled port {} command {} pc~{:06X}", PORT_NAMES[port], hex(cmd), pc);
+                }
+            }
         }
     }
 
@@ -237,6 +267,7 @@ impl Ikat {
             0xF6 => self.respond(2, &[0xA5, 0xF6, if self.pal { 0x02 } else { 0x01 }, 0xFF]),
             0xF7 => self.respond(2, &[0xA5, 0xF7, 0x00, 0xFF]),
             0x80 => self.pointer_enabled = true,
+            0x8C..=0x8E => self.arm_b(c),
             _ => {
                 if self.loud.first(0x2_0000 | c as u32) {
                     eprintln!("IKAT unmodelled port C command {:02X} pc~{:06X}", c, pc);
@@ -279,7 +310,7 @@ impl Ikat {
     }
 }
 
-opencdi::impl_state!(Port { cmd, reply } skip {});
+opencdi::impl_state!(Port { cmd, reply, len } skip {});
 opencdi::impl_state!(Ikat { mode, imr, ports, pointer_enabled, pal, disc_present, status_polls, pointer } skip { drive_busy, drive_event, loud, trace });
 
 #[cfg(test)]
@@ -297,12 +328,38 @@ mod tests {
         let r: Vec<u8> = (0..5).map(|_| k.read(0x0D, 0)).collect();
         assert_eq!(r, [0xA5, 0xF6, 0x02, 0xFF, 0xFF]);
         assert!(!k.irq());
-        for b in [0x80, 0x4E] {
+    }
+
+    #[test]
+    fn port_a_frames_and_port_b_arming() {
+        let mut k = Ikat::default();
+        for b in [0x80, 0x4E, 0x73] {
             k.write(0x01, b, 0);
         }
-        assert_eq!(k.ports[0].cmd, [0x80, 0x4E]);
-        k.write(0x01, 0x73, 0);
+        assert_eq!(k.ports[0].cmd, [0x80, 0x4E, 0x73]);
+        k.write(0x01, 0x00, 0);
         assert!(k.ports[0].cmd.is_empty());
+        k.write(0x01, 0x9A, 0);
+        assert_eq!(k.ports[1].cmd, [0x9A]);
+        for b in [0x0F, 0x50, 0x0B, 0x10, 0x00] {
+            k.write(0x03, b, 0);
+        }
+        assert_eq!(k.ports[1].cmd.len(), 6);
+        k.write(0x03, 0x00, 0);
+        assert!(k.ports[1].cmd.is_empty() && k.ports[1].reply.is_empty());
+        k.write(0x05, 0x8D, 0);
+        for b in [0x01, 0x80] {
+            k.write(0x03, b, 0);
+            assert_eq!(k.read(0x0B, 0), b);
+        }
+        k.write(0x05, 0x8E, 0);
+        assert!(k.ports[1].cmd.is_empty());
+        for b in [0x91, 0x00, 0x00] {
+            k.write(0x07, b, 0);
+        }
+        assert_eq!(k.ports[3].cmd.len(), 3);
+        k.write(0x07, 0x00, 0);
+        assert!(k.ports[3].cmd.is_empty());
     }
 
     #[test]

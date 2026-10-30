@@ -2,7 +2,7 @@
 use crate::libretro::*;
 use opencdi::input_script::{self, Pad, PadButton, START_X, START_Y, MAX_X, MAX_Y};
 use opencdi::mcd212::{SCREEN_HEIGHT, SCREEN_WIDTH};
-use opencdi::slave::SlaveHle;
+use opencdi::bus::CdiBus;
 use std::ffi::c_uint;
 
 // Left stick deflection that counts as a d-pad press.
@@ -28,7 +28,8 @@ impl Input {
     }
 
     // Call after input_poll and before run_frame; only calls the slave when (x, y, buttons) changed.
-    pub fn apply(&mut self, state: retro_input_state_t, slave: &mut SlaveHle) {
+    pub fn apply(&mut self, state: retro_input_state_t, bus: &mut CdiBus) {
+        let slave = &mut bus.slave;
         if slave.device_mouse_updated {
             slave.device_mouse_updated = false;
             self.x = slave.device_mouse_x;
@@ -87,7 +88,10 @@ impl Input {
         let now = (self.x, self.y, self.pointer_buttons | pad.buttons());
         if now != self.sent {
             self.sent = now;
-            slave.update_mouse(now.0, now.1, now.2);
+            match bus.mono4.as_deref_mut() {
+                Some(m4) => m4.ikat.update_pointer(now.0, now.1, now.2),
+                None => bus.slave.update_mouse(now.0, now.1, now.2),
+            }
         }
     }
 }
@@ -154,20 +158,20 @@ mod tests {
 
     #[test]
     fn dpad_and_pointer_reach_the_slave() {
-        let mut s = SlaveHle::new();
+        let mut bus = CdiBus::new();
         let mut inp = Input::new();
-        inp.apply(Some(fake), &mut s);
-        assert_eq!((s.device_mouse_x, s.device_mouse_y), (START_X, START_Y));
+        inp.apply(Some(fake), &mut bus);
+        assert_eq!((bus.slave.device_mouse_x, bus.slave.device_mouse_y), (START_X, START_Y));
         DEVICE_HELD.store(RETRO_DEVICE_JOYPAD, Ordering::SeqCst);
         ID_HELD.store(RETRO_DEVICE_ID_JOYPAD_RIGHT, Ordering::SeqCst);
-        inp.apply(Some(fake), &mut s);
-        inp.apply(Some(fake), &mut s);
-        assert_eq!(s.device_mouse_x, START_X + 2 * input_script::PAD_SPEED);
+        inp.apply(Some(fake), &mut bus);
+        inp.apply(Some(fake), &mut bus);
+        assert_eq!(bus.slave.device_mouse_x, START_X + 2 * input_script::PAD_SPEED);
         DEVICE_HELD.store(u32::MAX, Ordering::SeqCst);
         inp.device = RETRO_DEVICE_POINTER;
         PX.store(input_script::pixel_to_norm(575, SCREEN_WIDTH as i32) as i32, Ordering::SeqCst);
         PY.store(input_script::pixel_to_norm(335, SCREEN_HEIGHT as i32) as i32, Ordering::SeqCst);
-        inp.apply(Some(fake), &mut s);
-        assert_eq!((s.device_mouse_x, s.device_mouse_y), (575, 335));
+        inp.apply(Some(fake), &mut bus);
+        assert_eq!((bus.slave.device_mouse_x, bus.slave.device_mouse_y), (575, 335));
     }
 }

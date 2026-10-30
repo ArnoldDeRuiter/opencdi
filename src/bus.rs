@@ -329,6 +329,10 @@ impl CdiBus {
             BoardKind::Mono4 => {
                 if let Some(m) = self.mono4.as_deref_mut() {
                     m.ciap.tick(cycles, &mut self.cdrom);
+                    // A drive that stopped on its own sends one status report.
+                    if std::mem::take(&mut m.ciap.drive_stopped) {
+                        m.ikat.drive_report();
+                    }
                 }
             }
         }
@@ -1146,6 +1150,7 @@ impl CdiBus {
             }
             0x310000..=0x31FFFF if (addr & 1) == 1 => {
                 m.ikat.pal = self.mcd212.video_mode == crate::mcd212::VideoMode::Pal;
+                m.ikat.drive_busy = m.ciap.drive_active;
                 m.ikat.write(addr - 0x310000, value, pc);
                 if let Some(ev) = m.ikat.drive_event.take() {
                     m.ciap.drive(ev);

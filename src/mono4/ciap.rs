@@ -40,6 +40,8 @@ pub struct Ciap {
     pub q_mode: bool,
     pub lba: u32,
     pub drive_active: bool,
+    pub start_delay: u8, // sector periods after a seek before the first sector
+    pub drive_stopped: bool, // the drive stopped because delivery was off; the board reports it
     pub cycles: u32,
     pub dma_request: Option<u16>,
     pub seeks: u64,
@@ -52,7 +54,7 @@ pub struct Ciap {
 
 impl Default for Ciap {
     fn default() -> Self {
-        Self { ram: vec![0; WINDOW_SIZE], regs: power_on_regs(), running: false, q_mode: false, lba: 0, drive_active: false, cycles: 0, dma_request: None, seeks: 0, sectors: 0, skipped: 0, dmas: 0, loud: Loud::default(), trace: false }
+        Self { ram: vec![0; WINDOW_SIZE], regs: power_on_regs(), running: false, q_mode: false, lba: 0, drive_active: false, start_delay: 0, drive_stopped: false, cycles: 0, dma_request: None, seeks: 0, sectors: 0, skipped: 0, dmas: 0, loud: Loud::default(), trace: false }
     }
 }
 
@@ -66,13 +68,14 @@ impl Ciap {
     pub fn reset(&mut self) {
         self.regs = power_on_regs();
         (self.running, self.q_mode, self.lba, self.drive_active) = (false, false, 0, false);
+        (self.start_delay, self.drive_stopped) = (0, false);
     }
 
     /// Drive request from IKAT port D: a seek positions the next sector and starts the drive, a stop halts delivery.
     pub fn drive(&mut self, ev: super::ikat::DriveEvent) {
         match ev {
             super::ikat::DriveEvent::Seek(lba) => {
-                (self.lba, self.drive_active) = (lba, true);
+                (self.lba, self.drive_active, self.start_delay) = (lba, true, 1);
                 self.seeks += 1;
             }
             super::ikat::DriveEvent::Stop => self.drive_active = false,
@@ -226,15 +229,23 @@ impl Ciap {
         self.dmas += 1;
     }
 
-    /// Advances the sector clock; one sector every `CYCLES_PER_SECTOR` while delivery runs and the drive is active.
+    /// Advances the sector clock: one drive step every `CYCLES_PER_SECTOR`; the first sector comes on the second step after a seek, and a step with delivery off stops the drive.
     pub fn tick(&mut self, cycles: u32, cdrom: &mut Option<CdRom>) {
         self.cycles += cycles;
         while self.cycles >= opencdi::cdic::CYCLES_PER_SECTOR {
             self.cycles -= opencdi::cdic::CYCLES_PER_SECTOR;
-            if self.running && self.drive_active {
-                if let Some(cd) = cdrom.as_mut() {
-                    self.sector(cd);
+            if !self.drive_active {
+                continue;
+            }
+            if self.start_delay > 0 {
+                self.start_delay -= 1;
+            } else if !self.running {
+                (self.drive_active, self.drive_stopped) = (false, true);
+                if self.trace {
+                    eprintln!("CIAP DRIVE stopped, delivery off");
                 }
+            } else if let Some(cd) = cdrom.as_mut() {
+                self.sector(cd);
             }
         }
     }
@@ -294,7 +305,7 @@ impl Ciap {
     }
 }
 
-opencdi::impl_state!(Ciap { ram, regs, running, q_mode, lba, drive_active, cycles } skip { dma_request, seeks, sectors, skipped, dmas, loud, trace });
+opencdi::impl_state!(Ciap { ram, regs, running, q_mode, lba, drive_active, start_delay, cycles } skip { drive_stopped, dma_request, seeks, sectors, skipped, dmas, loud, trace });
 
 #[cfg(test)]
 mod tests {
@@ -332,6 +343,17 @@ mod tests {
         c.write_reg(REG_ASTAT, 0x1234, 0);
         c.write_reg(0x30, 0x1234, 0);
         assert_eq!((c.peek_reg(REG_ID), c.peek_reg(REG_ASTAT), c.peek_reg(0x30)), (CHIP_ID, 0, 0));
+    }
+
+    #[test]
+    fn drive_starts_late_and_stops_with_delivery_off() {
+        let mut c = Ciap::default();
+        let period = opencdi::cdic::CYCLES_PER_SECTOR;
+        c.drive(super::super::ikat::DriveEvent::Seek(13));
+        c.tick(period, &mut None);
+        assert!(c.drive_active && !c.drive_stopped);
+        c.tick(period, &mut None);
+        assert!(!c.drive_active && c.drive_stopped);
     }
 
     #[test]

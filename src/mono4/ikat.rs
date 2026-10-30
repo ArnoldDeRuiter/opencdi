@@ -31,6 +31,7 @@ pub struct Ikat {
     pub pal: bool, // video standard reported by the identification reply; set by the bus before each write
     pub disc_present: bool,
     pub status_polls: u8, // drive status polls answered since the disc appeared
+    pub drive_busy: bool, // drive seeking or reading; set by the bus before each write
     pub drive_event: Option<DriveEvent>,
     pub pointer: (i32, i32, u8), // host pointer: x 0..767, y 0..559, buttons (1, 2, 4 = third button)
     pub loud: Loud,
@@ -47,6 +48,7 @@ impl Default for Ikat {
             pal: true,
             disc_present: false,
             status_polls: 0,
+            drive_busy: false,
             drive_event: None,
             pointer: (384, 280, 0),
             loud: Loud::default(),
@@ -76,6 +78,20 @@ impl Ikat {
     pub fn set_disc_present(&mut self, present: bool) {
         self.disc_present = present;
         self.status_polls = 0;
+    }
+
+    /// Drive status reply: without a disc all zero; with one, two spin-up replies (0x610, 0x60E), then ready (0x215).
+    pub fn drive_report(&mut self) {
+        let st: [u8; 2] = match (self.disc_present, self.status_polls) {
+            (false, _) => [0x00, 0x00],
+            (true, 0) => [0x06, 0x10],
+            (true, 1) => [0x06, 0x0E],
+            (true, _) => [0x02, 0x15],
+        };
+        if self.disc_present {
+            self.status_polls = self.status_polls.saturating_add(1);
+        }
+        self.respond(3, &[0xB0, 0x00, st[0], st[1]]);
     }
 
     /// Host pointer position and buttons; reported on port B while pointer reports are enabled (enable bit 0x08).
@@ -237,19 +253,13 @@ impl Ikat {
     // Port D: drive commands, four bytes, command byte first with bit 7 set.
     fn execute_d(&mut self, cmd: &[u8], pc: u32) {
         match cmd[0] {
-            // Status: without a disc all zero; with one, two spin-up replies (0x610, 0x60E), then ready (0x215).
-            0xB0 | 0xA1 => {
-                let st: [u8; 2] = match (self.disc_present, self.status_polls) {
-                    (false, _) => [0x00, 0x00],
-                    (true, 0) => [0x06, 0x10],
-                    (true, 1) => [0x06, 0x0E],
-                    (true, _) => [0x02, 0x15],
-                };
-                if self.disc_present {
-                    self.status_polls = self.status_polls.saturating_add(1);
+            // Status: no reply while the drive seeks or reads.
+            0xB0 | 0xA1 if self.drive_busy => {
+                if self.trace {
+                    eprintln!("IKAT PORT D status request {} dropped, drive busy pc~{:06X}", hex(cmd), pc);
                 }
-                self.respond(3, &[0xB0, 0x00, st[0], st[1]]);
             }
+            0xB0 | 0xA1 => self.drive_report(),
             0xB1 => self.respond(3, &[0xB1, 0x00, 0x02, 0x00]),
             0xB2 => self.respond(3, if self.disc_present { &[0xB2, 0x20, 0x00, 0x01] } else { &[0xB2, 0x00, 0x00, 0x00] }),
             // Seek to a BCD time; the next sector delivered is that time minus 150 frames. No reply.
@@ -275,7 +285,7 @@ impl Ikat {
 }
 
 opencdi::impl_state!(Port { cmd, reply } skip {});
-opencdi::impl_state!(Ikat { mode, imr, ports, pointer_enabled, pal, disc_present, status_polls, pointer } skip { drive_event, loud, trace });
+opencdi::impl_state!(Ikat { mode, imr, ports, pointer_enabled, pal, disc_present, status_polls, pointer } skip { drive_busy, drive_event, loud, trace });
 
 #[cfg(test)]
 mod tests {
@@ -328,5 +338,12 @@ mod tests {
             k.write(0x07, b, 0);
         }
         assert_eq!(k.drive_event, Some(DriveEvent::Seek(13)));
+        k.drive_busy = true;
+        for b in [0xB0, 0, 0, 0] {
+            k.write(0x07, b, 0);
+        }
+        assert!(k.ports[3].reply.is_empty());
+        k.drive_report();
+        assert_eq!(k.ports[3].reply.len(), 4);
     }
 }

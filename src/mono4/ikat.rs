@@ -302,12 +302,14 @@ impl Ikat {
     fn execute_d(&mut self, cmd: &[u8], pc: u32) {
         match cmd[0] {
             // Status: no reply while the drive seeks or reads.
-            0xB0 | 0xA1 if self.drive_busy => {
+            // Start-up status: not answered on this IKAT release.
+            0xA1 => {}
+            0xB0 if self.drive_busy => {
                 if self.trace || self.loud.first(0x5_0000) {
                     eprintln!("IKAT PORT D status request {} dropped, drive busy pc~{:06X}", hex(cmd), pc);
                 }
             }
-            0xB0 | 0xA1 => self.drive_report(),
+            0xB0 => self.drive_report(),
             0xB1 => self.respond(3, &[0xB1, 0x00, 0x02, 0x00]),
             0xB2 => self.respond(3, if self.disc_present { &[0xB2, 0x20, 0x00, 0x01] } else { &[0xB2, 0x00, 0x00, 0x00] }),
             // Seek to a BCD time; the next sector delivered is that time minus 150 frames. No reply.

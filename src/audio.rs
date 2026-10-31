@@ -80,6 +80,8 @@ pub struct CdiAudio {
     pub source_rate: Arc<AtomicU32>,
     pub volume: f32,
     pub muted: bool,
+    /// Gains left-to-left, left-to-right, right-to-right, right-to-left; None passes the stereo pair unchanged.
+    pub matrix: Option<[f32; 4]>,
     pub total_sectors_decoded: u64,
 }
 
@@ -97,6 +99,7 @@ impl CdiAudio {
             source_rate: Arc::new(AtomicU32::new(37800)),
             volume: 1.0,
             muted: false,
+            matrix: None,
             total_sectors_decoded: 0,
         }
     }
@@ -223,6 +226,15 @@ impl CdiAudio {
         samples
     }
 
+    fn apply_matrix(&self, mut samples: Vec<(f32, f32)>) -> Vec<(f32, f32)> {
+        if let Some([ll, lr, rr, rl]) = self.matrix {
+            for (l, r) in samples.iter_mut() {
+                (*l, *r) = (*l * ll + *r * rl, *r * rr + *l * lr);
+            }
+        }
+        samples
+    }
+
     // 18.9 kHz goes through the upsampler; a 37.8 kHz sector passes as is and clears the upsampler's history.
     fn upsample_if_needed(up: &mut Upsampler, samples: Vec<(f32, f32)>, sample_rate: u32) -> Vec<(f32, f32)> {
         if sample_rate != 18900 {
@@ -252,6 +264,7 @@ impl CdiAudio {
             &mut self.right_state,
         );
         let final_samples = Self::upsample_if_needed(&mut self.upsampler, samples, sample_rate);
+        let final_samples = self.apply_matrix(final_samples);
 
         if let Ok(mut q) = self.sample_queue.lock() {
             // Cap queue at ~0.25s of audio to prevent latency while avoiding clicks
@@ -283,6 +296,7 @@ impl CdiAudio {
             &mut self.map_right_state,
         );
         let final_samples = Self::upsample_if_needed(&mut self.map_upsampler, samples, sample_rate);
+        let final_samples = self.apply_matrix(final_samples);
 
         if let Ok(mut sq) = self.sfx_queue.lock() {
             const MAX_SFX_SAMPLES: usize = 37800 / 4;
@@ -501,7 +515,7 @@ opencdi::impl_state!(ChannelState { s0, s1 } skip {});
 // Host queues are not state (the frontend drains them every frame); volume and mute are host settings.
 impl opencdi::savestate::State for CdiAudio {
     fn save(&self, w: &mut Vec<u8>) {
-        let Self { left_state, right_state, map_left_state, map_right_state, upsampler, map_upsampler, sample_queue: _, sfx_queue: _, source_rate, volume: _, muted: _, total_sectors_decoded } = self;
+        let Self { left_state, right_state, map_left_state, map_right_state, upsampler, map_upsampler, sample_queue: _, sfx_queue: _, source_rate, volume: _, muted: _, matrix: _, total_sectors_decoded } = self;
         for s in [left_state, right_state, map_left_state, map_right_state] {
             s.save(w);
         }
@@ -512,7 +526,7 @@ impl opencdi::savestate::State for CdiAudio {
     }
 
     fn load(&mut self, r: &mut opencdi::savestate::Reader) -> Result<(), opencdi::savestate::StateError> {
-        let Self { left_state, right_state, map_left_state, map_right_state, upsampler, map_upsampler, sample_queue, sfx_queue, source_rate, volume: _, muted: _, total_sectors_decoded } = self;
+        let Self { left_state, right_state, map_left_state, map_right_state, upsampler, map_upsampler, sample_queue, sfx_queue, source_rate, volume: _, muted: _, matrix: _, total_sectors_decoded } = self;
         for s in [left_state, right_state, map_left_state, map_right_state] {
             s.load(r)?;
         }
@@ -534,6 +548,17 @@ impl opencdi::savestate::State for CdiAudio {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_matrix_mixes_and_mutes_the_stereo_pair() {
+        let mut a = CdiAudio::new();
+        let input = vec![(0.5f32, 0.25f32)];
+        assert_eq!(a.apply_matrix(input.clone()), input);
+        a.matrix = Some([1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(a.apply_matrix(input.clone()), vec![(0.75, 0.75)]);
+        a.matrix = Some([0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(a.apply_matrix(input), vec![(0.0, 0.25)]);
+    }
 
     #[test]
     fn eight_bit_groups_use_the_last_parameter_copy() {

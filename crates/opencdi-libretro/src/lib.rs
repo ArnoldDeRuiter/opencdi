@@ -270,7 +270,8 @@ fn find_impeg(dir: &Path) -> Option<PathBuf> {
             Err(e) => log(RETRO_LOG_WARN, &format!("IMPEG {}: {}", p.display(), e)),
         }
     }
-    if !candidates(dir, DVC_NAMES).is_empty() {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !candidates(dir, DVC_NAMES).is_empty() && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         log(RETRO_LOG_WARN, "a VMPEG cartridge ROM is present but does not fit the CD-i 490; it needs impega.rom");
     }
     log(RETRO_LOG_INFO, "no IMPEG cartridge ROM (impega.rom); Digital Video titles will ask for the cartridge");

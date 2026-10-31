@@ -1640,32 +1640,6 @@ impl opencdi::savestate::State for Mp2Decoder {
 
 #[cfg(test)]
 mod window_tests {
-    #[test]
-    fn impeg_audio_bits_pio_and_state() {
-        assert_eq!(Dvc::impeg_bits_from(0x0100 | 0x0008 | 0x0020 | 0x0001 | 0x0004), 0x0800 | 0x0100 | 0x0400 | 0x8000 | 0x0004);
-        assert_eq!(Dvc::impeg_bits_to(0x3D14), 0x0100 | 0x0020 | 0x0008 | 0x0010 | 0x0004);
-        let mut d = Dvc::new();
-        d.impeg = true;
-        d.write_word(0xE0421C, 0x3D14);
-        assert_eq!(d.read_word(0xE0421C), 0x3D14);
-        // Data-port words go to the stream only in PIO mode and only as complete words.
-        let before = d.fma_stream_fifo.len();
-        d.write_word(0xE0411E, 0x1234);
-        assert_eq!(d.fma_stream_fifo.len(), before);
-        d.write_word(0xE04200, 0x0100);
-        d.write_byte(0xE0411F, 0x56);
-        assert_eq!(d.fma_stream_fifo.len(), before);
-        d.write_word(0xE0411E, 0xABCD);
-        assert_eq!(d.fma_stream_fifo.len(), before + 2);
-        let mut buf = Vec::new();
-        opencdi::savestate::State::save(&d, &mut buf);
-        let mut e = Dvc::new();
-        opencdi::savestate::State::load(&mut e, &mut opencdi::savestate::Reader::new(&buf)).unwrap();
-        assert_eq!((e.impeg_pio, e.impeg_regs[0x11C], e.impeg_regs[0x11D]), (true, 0x3D, 0x14));
-        d.reset();
-        assert!(!d.impeg_pio && d.impeg_regs.iter().all(|&b| b == 0));
-    }
-
     use super::*;
 
     #[test]
@@ -1694,5 +1668,37 @@ mod window_tests {
         assert_eq!(out[10], 0xFF00_001C);
         d.get_scanline(13, &mut out, &mut present);
         assert!(!present.iter().any(|&p| p));
+    }
+}
+
+#[cfg(test)]
+mod impeg_tests {
+    use super::*;
+
+    #[test]
+    fn impeg_audio_bits_pio_and_state() {
+        assert_eq!(Dvc::impeg_bits_from(0x0100 | 0x0008 | 0x0020 | 0x0001 | 0x0004), 0x0800 | 0x0100 | 0x0400 | 0x8000 | 0x0004);
+        assert_eq!(Dvc::impeg_bits_to(0x3D14), 0x0100 | 0x0020 | 0x0008 | 0x0010 | 0x0004);
+        let mut d = Dvc::new();
+        d.impeg = true;
+        d.write_word(0xE0421C, 0x3D14);
+        assert_eq!(d.read_word(0xE0421C), 0x3D14);
+        assert_eq!(d.get_fma_word(FMA_IER), Dvc::impeg_bits_to(0x3D14));
+        // Data-port words go to the stream only in PIO mode and only as complete words.
+        let before = d.fma_stream_fifo.len();
+        d.write_word(0xE0411E, 0x1234);
+        assert_eq!(d.fma_stream_fifo.len(), before);
+        d.write_word(0xE04200, 0x0100);
+        d.write_byte(0xE0411F, 0x56);
+        assert_eq!(d.fma_stream_fifo.len(), before);
+        d.write_word(0xE0411E, 0xABCD);
+        assert_eq!(d.fma_stream_fifo.len(), before + 2);
+        let mut buf = Vec::new();
+        opencdi::savestate::State::save(&d, &mut buf);
+        let mut e = Dvc::new();
+        opencdi::savestate::State::load(&mut e, &mut opencdi::savestate::Reader::new(&buf)).unwrap();
+        assert_eq!((e.impeg_pio, e.impeg_regs[0x11C], e.impeg_regs[0x11D]), (true, 0x3D, 0x14));
+        d.reset();
+        assert!(!d.impeg_pio && d.impeg_regs.iter().all(|&b| b == 0));
     }
 }

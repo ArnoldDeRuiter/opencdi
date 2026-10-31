@@ -50,11 +50,31 @@ impl ChannelState {
     }
 }
 
+// Doubles 18.9 kHz audio to 37.8 kHz: each input passes through and the point halfway to the next is a Catmull-Rom cubic over the four nearest inputs, so output trails input by two samples.
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
+pub struct Upsampler {
+    pub hist: [(f32, f32); 3],
+}
+
+impl Upsampler {
+    fn run(&mut self, input: &[(f32, f32)], out: &mut Vec<(f32, f32)>) {
+        let mid = |a: f32, b: f32, c: f32, d: f32| (9.0 * (b + c) - (a + d)) / 16.0;
+        for &d in input {
+            let [a, b, c] = self.hist;
+            out.push(b);
+            out.push((mid(a.0, b.0, c.0, d.0), mid(a.1, b.1, c.1, d.1)));
+            self.hist = [b, c, d];
+        }
+    }
+}
+
 pub struct CdiAudio {
     pub left_state: ChannelState,
     pub right_state: ChannelState,
     pub map_left_state: ChannelState,
     pub map_right_state: ChannelState,
+    pub upsampler: Upsampler,
+    pub map_upsampler: Upsampler,
     pub sample_queue: Arc<Mutex<VecDeque<(f32, f32)>>>,
     pub sfx_queue: Arc<Mutex<VecDeque<(f32, f32)>>>,
     pub source_rate: Arc<AtomicU32>,
@@ -70,6 +90,8 @@ impl CdiAudio {
             right_state: ChannelState::default(),
             map_left_state: ChannelState::default(),
             map_right_state: ChannelState::default(),
+            upsampler: Upsampler::default(),
+            map_upsampler: Upsampler::default(),
             sample_queue: Arc::new(Mutex::new(VecDeque::with_capacity(32768))),
             sfx_queue: Arc::new(Mutex::new(VecDeque::with_capacity(16384))),
             source_rate: Arc::new(AtomicU32::new(37800)),
@@ -84,6 +106,8 @@ impl CdiAudio {
         self.right_state.reset();
         self.map_left_state.reset();
         self.map_right_state.reset();
+        self.upsampler = Upsampler::default();
+        self.map_upsampler = Upsampler::default();
         if let Ok(mut q) = self.sample_queue.lock() {
             q.clear();
         }
@@ -199,19 +223,15 @@ impl CdiAudio {
         samples
     }
 
-    fn upsample_if_needed(samples: Vec<(f32, f32)>, sample_rate: u32) -> Vec<(f32, f32)> {
-        if sample_rate == 18900 {
-            let mut upsampled = Vec::with_capacity(samples.len() * 2);
-            for i in 0..samples.len() {
-                let s0 = samples[i];
-                let s1 = if i + 1 < samples.len() { samples[i + 1] } else { s0 };
-                upsampled.push(s0);
-                upsampled.push(((s0.0 + s1.0) * 0.5, (s0.1 + s1.1) * 0.5));
-            }
-            upsampled
-        } else {
-            samples
+    // 18.9 kHz goes through the upsampler; a 37.8 kHz sector passes as is and clears the upsampler's history.
+    fn upsample_if_needed(up: &mut Upsampler, samples: Vec<(f32, f32)>, sample_rate: u32) -> Vec<(f32, f32)> {
+        if sample_rate != 18900 {
+            *up = Upsampler::default();
+            return samples;
         }
+        let mut out = Vec::with_capacity(samples.len() * 2);
+        up.run(&samples, &mut out);
+        out
     }
 
     pub fn decode_sector(&mut self, payload: &[u8], is_stereo: bool, is_8bit: bool, sample_rate: u32) {
@@ -231,7 +251,7 @@ impl CdiAudio {
             &mut self.left_state,
             &mut self.right_state,
         );
-        let final_samples = Self::upsample_if_needed(samples, sample_rate);
+        let final_samples = Self::upsample_if_needed(&mut self.upsampler, samples, sample_rate);
 
         if let Ok(mut q) = self.sample_queue.lock() {
             // Cap queue at ~0.25s of audio to prevent latency while avoiding clicks
@@ -262,7 +282,7 @@ impl CdiAudio {
             &mut self.map_left_state,
             &mut self.map_right_state,
         );
-        let final_samples = Self::upsample_if_needed(samples, sample_rate);
+        let final_samples = Self::upsample_if_needed(&mut self.map_upsampler, samples, sample_rate);
 
         if let Ok(mut sq) = self.sfx_queue.lock() {
             const MAX_SFX_SAMPLES: usize = 37800 / 4;
@@ -481,16 +501,18 @@ opencdi::impl_state!(ChannelState { s0, s1 } skip {});
 // Host queues are not state (the frontend drains them every frame); volume and mute are host settings.
 impl opencdi::savestate::State for CdiAudio {
     fn save(&self, w: &mut Vec<u8>) {
-        let Self { left_state, right_state, map_left_state, map_right_state, sample_queue: _, sfx_queue: _, source_rate, volume: _, muted: _, total_sectors_decoded } = self;
+        let Self { left_state, right_state, map_left_state, map_right_state, upsampler, map_upsampler, sample_queue: _, sfx_queue: _, source_rate, volume: _, muted: _, total_sectors_decoded } = self;
         for s in [left_state, right_state, map_left_state, map_right_state] {
             s.save(w);
         }
         source_rate.load(Ordering::Relaxed).save(w);
         total_sectors_decoded.save(w);
+        upsampler.hist.save(w);
+        map_upsampler.hist.save(w);
     }
 
     fn load(&mut self, r: &mut opencdi::savestate::Reader) -> Result<(), opencdi::savestate::StateError> {
-        let Self { left_state, right_state, map_left_state, map_right_state, sample_queue, sfx_queue, source_rate, volume: _, muted: _, total_sectors_decoded } = self;
+        let Self { left_state, right_state, map_left_state, map_right_state, upsampler, map_upsampler, sample_queue, sfx_queue, source_rate, volume: _, muted: _, total_sectors_decoded } = self;
         for s in [left_state, right_state, map_left_state, map_right_state] {
             s.load(r)?;
         }
@@ -498,6 +520,8 @@ impl opencdi::savestate::State for CdiAudio {
         rate.load(r)?;
         source_rate.store(rate, Ordering::Relaxed);
         total_sectors_decoded.load(r)?;
+        upsampler.hist.load(r)?;
+        map_upsampler.hist.load(r)?;
         for q in [sample_queue, sfx_queue] {
             if let Ok(mut q) = q.lock() {
                 q.clear();
@@ -523,5 +547,19 @@ mod tests {
         a.decode_sector(&payload, false, true, 37800);
         let first = a.sample_queue.lock().unwrap()[0].0;
         assert_eq!(first, 256.0 / 32768.0);
+    }
+
+    #[test]
+    fn upsampler_passes_inputs_and_interpolates_between_them() {
+        let mut up = Upsampler::default();
+        let mut out = Vec::new();
+        let x: Vec<(f32, f32)> = [1.0f32, 2.0, 3.0, 5.0].iter().map(|&v| (v, -v)).collect();
+        up.run(&x[..2], &mut out);
+        up.run(&x[2..], &mut out);
+        // Two samples of delay: inputs 1 and 2 come out at 4 and 6, the cubic midpoint of 1..2 at 5.
+        assert_eq!(out.len(), 8);
+        assert_eq!((out[4], out[6]), ((1.0, -1.0), (2.0, -2.0)));
+        assert_eq!(out[5], (1.5, -1.5));
+        assert_eq!(up.hist, [x[1], x[2], x[3]]);
     }
 }

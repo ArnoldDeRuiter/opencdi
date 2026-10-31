@@ -875,6 +875,13 @@ impl CdiBus {
                 0x2020..=0x2029 | 0x2045 | 0x2047 => self.scc_timer.write_byte(reg, value),
                 0x4000..=0x406F => {
                     let offset = (reg - 0x4000) & !1;
+                    // The error register is read-only, and a status byte write clears only its own bits.
+                    if offset % 0x40 == 0 {
+                        if (reg & 1) == 0 {
+                            self.dma.write_reg(offset, (value as u16) << 8);
+                        }
+                        return;
+                    }
                     let cur = self.dma.read_reg(offset);
                     let new_val = if (reg & 1) == 0 {
                         (cur & 0x00FF) | ((value as u16) << 8)
@@ -1545,6 +1552,17 @@ mod tests {
         assert_eq!(bus.mono4_iack(4), Some(0x5A));
         bus.dvc.set_fmv_word(crate::dvc::FMV_ISR, 0);
         assert_eq!(bus.mono4_iack(4), Some(0x3C));
+    }
+
+    #[test]
+    fn dma_error_byte_is_read_only_and_status_byte_clears_only_its_bits() {
+        let mut bus = CdiBus::new();
+        bus.dma.channels[0].channel_status = 0x90;
+        bus.dma.channels[0].channel_error = 0x02;
+        bus.write_byte(0x8000_4001, 0xFF);
+        assert_eq!((bus.dma.channels[0].channel_status, bus.dma.channels[0].channel_error), (0x90, 0x02));
+        bus.write_byte(0x8000_4000, 0x10);
+        assert_eq!(bus.dma.channels[0].channel_status, 0x80);
     }
 
     #[test]

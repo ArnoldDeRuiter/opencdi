@@ -754,8 +754,8 @@ impl Dvc {
     }
 
     /// IMPEG addresses that some register, RAM or ROM answers; the rest of the cartridge window is a hole.
-    pub fn impeg_mapped(addr: u32) -> bool {
-        matches!(addr & 0x00FF_FFFF, 0xD00000..=0xDFFFFF | 0xE01000..=0xE01FFF | 0xE04000..=0xE043FF | 0xE04800..=0xE07FFF | 0xE40000..=0xEFFFFF)
+    pub fn impeg_mapped(&self, addr: u32) -> bool {
+        self.impeg && matches!(addr & 0x00FF_FFFF, 0xD00000..=0xDFFFFF | 0xE01000..=0xE01FFF | 0xE04000..=0xE043FF | 0xE04800..=0xE07FFF | 0xE40000..=0xEFFFFF)
     }
 
     pub fn tick(&mut self, cycles: u32) {

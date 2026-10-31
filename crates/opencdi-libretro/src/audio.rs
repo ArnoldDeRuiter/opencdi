@@ -1,4 +1,3 @@
-use opencdi::cdic::CYCLES_PER_SECTOR;
 use opencdi::mcd212::VideoMode;
 use std::collections::VecDeque;
 
@@ -19,7 +18,7 @@ pub fn frame_cycles(mode: VideoMode) -> u64 {
 
 // Field rate on the CD sector clock (75 sectors per second), so one field of audio is exactly what the emulation produces.
 pub fn field_rate(mode: VideoMode) -> f64 {
-    (SECTORS_PER_SECOND * CYCLES_PER_SECTOR as u64) as f64 / frame_cycles(mode) as f64
+    (SECTORS_PER_SECOND * mode.cycles_per_sector() as u64) as f64 / frame_cycles(mode) as f64
 }
 
 // One audio stream at OUT_RATE between the emulation and the frontend.
@@ -153,8 +152,9 @@ impl Pacer {
     // Frames due this field: 504 per sector times the sectors the field lasts, remainder carried.
     fn field_len(&mut self, mode: VideoMode) -> usize {
         self.rem += SAMPLES_PER_SECTOR * frame_cycles(mode);
-        let n = self.rem / CYCLES_PER_SECTOR as u64;
-        self.rem %= CYCLES_PER_SECTOR as u64;
+        let sector = mode.cycles_per_sector() as u64;
+        let n = self.rem / sector;
+        self.rem %= sector;
         n as usize
     }
 
@@ -191,12 +191,12 @@ mod tests {
     fn field_rate_and_lengths_follow_the_sector_clock() {
         let mut p = Pacer::new();
         let pal: usize = (0..1000).map(|_| p.field_len(VideoMode::Pal)).sum();
-        assert_eq!(pal, (504u64 * 309_816 * 1000 / 206_700) as usize);
-        assert!((field_rate(VideoMode::Pal) - 50.0378).abs() < 1e-4);
+        assert_eq!(pal, (504u64 * 299_520 * 1000 / 200_000) as usize);
+        assert!((field_rate(VideoMode::Pal) - 50.0801).abs() < 1e-4);
         let mut p = Pacer::new();
         let lens: Vec<usize> = (0..4).map(|_| p.field_len(VideoMode::Ntsc)).collect();
-        assert_eq!(lens, [629, 629, 629, 630]);
-        assert!((field_rate(VideoMode::Ntsc) - 60.0709).abs() < 1e-4);
+        assert_eq!(lens, [629, 629, 630, 629]);
+        assert!((field_rate(VideoMode::Ntsc) - 60.0543).abs() < 1e-4);
     }
 
     #[test]

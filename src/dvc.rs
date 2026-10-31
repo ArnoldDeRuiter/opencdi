@@ -7,9 +7,8 @@ pub mod mpeg;
 
 use self::mpeg::Video;
 
-/// DCLK runs at 45 kHz (15.5 MHz / ~344.44)
+/// DCLK runs at 45 kHz, counted against the CPU clock
 pub const DCLK_FREQ: u64 = 45_000;
-pub const MASTER_CLOCK: u64 = 15_500_000;
 
 // FMV Register Byte Offsets (within 0xE04000..0xE040FF)
 pub const FMV_IER: usize = 0x60;
@@ -444,6 +443,8 @@ pub struct Dvc {
     pub fps: f64,
     pub frame_accum: f64,
     pub vsync_hz: f64,
+    // CPU clock the cycle counts are measured in (set by the bus from the video standard).
+    pub cpu_hz: u64,
 
     // Stream & Demux
     pub dvc_stream_fifo: Vec<u8>,
@@ -527,6 +528,7 @@ impl Dvc {
             fps: 25.0,
             frame_accum: 0.0,
             vsync_hz: 50.0,
+            cpu_hz: 15_000_000,
 
             dvc_stream_fifo: Vec::with_capacity(128 * 1024),
             fma_stream_fifo: Vec::with_capacity(64 * 1024),
@@ -771,15 +773,15 @@ impl Dvc {
 
         // DCLK runs at 45 kHz
         self.dclk_accum += (cycles as u64) * DCLK_FREQ;
-        while self.dclk_accum >= MASTER_CLOCK {
-            self.dclk_accum -= MASTER_CLOCK;
+        while self.dclk_accum >= self.cpu_hz {
+            self.dclk_accum -= self.cpu_hz;
             self.dclk = self.dclk.wrapping_add(1);
         }
 
         // FMV Timer runs at 5,625 Hz (period set by TCNT)
         self.timer_accum += (cycles as u64) * 5_625;
-        while self.timer_accum >= MASTER_CLOCK {
-            self.timer_accum -= MASTER_CLOCK;
+        while self.timer_accum >= self.cpu_hz {
+            self.timer_accum -= self.cpu_hz;
             let compare = self.get_fmv_word(FMV_TIMER);
             if compare > 0 && self.timer_counter >= compare {
                 self.timer_counter = 0;
@@ -1358,7 +1360,7 @@ impl Dvc {
     // Decoded samples are queued for output at once, but play for their length at the stream's rate.
     fn extend_playout(&mut self, samples: usize) {
         let rate = u64::from(self.audio_sample_rate.max(1));
-        self.fma_playout_end = self.fma_playout_end.max(self.total_cycles) + samples as u64 * MASTER_CLOCK / rate;
+        self.fma_playout_end = self.fma_playout_end.max(self.total_cycles) + samples as u64 * self.cpu_hz / rate;
     }
 
     pub fn on_vsync(&mut self) {
@@ -1600,7 +1602,7 @@ opencdi::impl_state!(Dvc {
     underflow_count, fma_underflow_count, fma_decoded_since_play, fma_playout_end, has_valid_frame,
     impeg_regs, impeg_pio, impeg_hi_valid,
 } skip {
-    rom, impeg, impeg_fw, impeg_ivec_zero_logged,
+    rom, impeg, impeg_fw, impeg_ivec_zero_logged, cpu_hz,
 });
 
 opencdi::impl_state!(MpegSystemDemux {

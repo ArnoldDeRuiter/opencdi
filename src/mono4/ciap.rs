@@ -312,11 +312,11 @@ impl Ciap {
         self.dmas += 1;
     }
 
-    /// Advances the sector clock: one drive step every `CYCLES_PER_SECTOR`; the first sector comes on the second step after a seek, and a step with delivery off stops the drive.
-    pub fn tick(&mut self, cycles: u32, cdrom: &mut Option<CdRom>, audio: &mut CdiAudio) {
+    /// Advances the sector clock: one drive step every `sector_cycles`; the first sector comes on the second step after a seek, and a step with delivery off stops the drive.
+    pub fn tick(&mut self, cycles: u32, sector_cycles: u32, cdrom: &mut Option<CdRom>, audio: &mut CdiAudio) {
         self.cycles += cycles;
-        while self.cycles >= opencdi::cdic::CYCLES_PER_SECTOR {
-            self.cycles -= opencdi::cdic::CYCLES_PER_SECTOR;
+        while self.cycles >= sector_cycles {
+            self.cycles -= sector_cycles;
             self.audio_step(audio);
             if self.toc && self.running && self.q_mode {
                 if let Some(cd) = cdrom.as_ref() {
@@ -573,11 +573,11 @@ mod tests {
     #[test]
     fn drive_starts_late_and_stops_with_delivery_off() {
         let mut c = Ciap::default();
-        let period = opencdi::cdic::CYCLES_PER_SECTOR;
+        let period = opencdi::mcd212::VideoMode::Pal.cycles_per_sector();
         c.drive(super::super::ikat::DriveEvent::Seek(13));
-        c.tick(period, &mut None, &mut CdiAudio::new());
+        c.tick(period, period, &mut None, &mut CdiAudio::new());
         assert!(c.drive_active && !c.drive_stopped);
-        c.tick(period, &mut None, &mut CdiAudio::new());
+        c.tick(period, period, &mut None, &mut CdiAudio::new());
         assert!(!c.drive_active && c.drive_stopped);
     }
 
@@ -622,7 +622,7 @@ mod tests {
     fn cpu_fed_audio_plays_queued_buffers_and_hands_them_back() {
         let mut c = Ciap::default();
         let mut audio = CdiAudio::new();
-        let period = opencdi::cdic::CYCLES_PER_SECTOR;
+        let period = opencdi::mcd212::VideoMode::Pal.cycles_per_sector();
         c.write_reg(REG_ASHDW, 0x0800, 0);
         c.write_reg(REG_BMAN, 0x01, 0);
         c.write_reg(REG_BMAN, 0x02, 0);
@@ -631,13 +631,13 @@ mod tests {
         assert_eq!(c.peek_reg(REG_ISR) & ISR_AUDIO_EVENT, 0);
         c.write_reg(REG_APCR, 0x140, 0);
         c.write_reg(REG_IER, ISR_AUDIO_DONE, 0);
-        c.tick(period, &mut None, &mut audio);
+        c.tick(period, period, &mut None, &mut audio);
         assert_eq!((c.peek_reg(REG_BMAN) & 3, c.read_reg(REG_ISR, 0) & ISR_AUDIO_DONE), (2, ISR_AUDIO_DONE));
-        c.tick(period * 3, &mut None, &mut audio);
+        c.tick(period * 3, period, &mut None, &mut audio);
         assert_eq!(c.peek_reg(REG_BMAN) & 3, 2);
-        c.tick(period, &mut None, &mut audio);
+        c.tick(period, period, &mut None, &mut audio);
         assert_eq!((c.peek_reg(REG_BMAN) & 3, c.audio_buffers), (0, 2));
-        c.tick(period * 4, &mut None, &mut audio);
+        c.tick(period * 4, period, &mut None, &mut audio);
         assert!(!c.audio_playing);
         c.write_reg(REG_APCR, 0x20, 0);
         assert_eq!(c.peek_reg(REG_ISR) & ISR_AUDIO_EVENT, ISR_AUDIO_EVENT);
@@ -646,19 +646,19 @@ mod tests {
 
     #[test]
     fn audio_stop_tacs_reset_and_state() {
-        let period = opencdi::cdic::CYCLES_PER_SECTOR;
+        let period = opencdi::mcd212::VideoMode::Pal.cycles_per_sector();
         let mut audio = CdiAudio::new();
         let mut c = Ciap::default();
         c.write_reg(REG_BMAN, 0x03, 0);
         c.write_reg(REG_APCR, 0x140, 0);
-        c.tick(period, &mut None, &mut audio);
+        c.tick(period, period, &mut None, &mut audio);
         assert_eq!(c.peek_reg(REG_BMAN) & 3, 2);
         // 0xA0 raises the event at once; the queued buffer still plays and playback then ends.
         c.write_reg(REG_APCR, 0xA0, 0);
         assert!(c.audio_playing && c.peek_reg(REG_ISR) & ISR_AUDIO_EVENT != 0);
-        c.tick(period * 8, &mut None, &mut audio);
+        c.tick(period * 8, period, &mut None, &mut audio);
         assert_eq!((c.peek_reg(REG_BMAN) & 3, c.audio_buffers), (0, 2));
-        c.tick(period * 8, &mut None, &mut audio);
+        c.tick(period * 8, period, &mut None, &mut audio);
         assert!(!c.audio_playing);
         // With the queue drained, a later 0x20 raises the event.
         c.read_reg(REG_ISR, 0);
@@ -667,13 +667,13 @@ mod tests {
         // A buffer queued while playing is played in turn.
         c.write_reg(REG_APCR, 0x140, 0);
         c.write_reg(REG_BMAN, 0x01, 0);
-        c.tick(period * 9, &mut None, &mut audio);
+        c.tick(period * 9, period, &mut None, &mut audio);
         assert_eq!(c.peek_reg(REG_BMAN) & 3, 0);
         // State round trip during playback.
         c.write_reg(REG_ASHDW, 0x3000, 0);
         c.write_reg(REG_BMAN, 0x03, 0);
         c.write_reg(REG_APCR, 0x140, 0);
-        c.tick(period, &mut None, &mut audio);
+        c.tick(period, period, &mut None, &mut audio);
         let mut buf = Vec::new();
         opencdi::savestate::State::save(&c, &mut buf);
         let mut d = Ciap::default();

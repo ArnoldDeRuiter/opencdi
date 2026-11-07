@@ -8,6 +8,7 @@ pub struct Timekeeper {
     pub dirty_frames: u32,
     // Empty: no persistence (harness, libretro); the GUI host sets the file.
     pub save_path: PathBuf,
+    pub persist: bool, // false when the frontend keeps the RAM (libretro save RAM), so no file is written
 }
 
 impl Timekeeper {
@@ -17,6 +18,7 @@ impl Timekeeper {
             dirty: false,
             dirty_frames: 0,
             save_path: PathBuf::new(),
+            persist: true,
         };
         tk.init_default();
         tk
@@ -47,7 +49,10 @@ impl Timekeeper {
     }
 
     pub fn flush_if_dirty(&mut self) {
-        if self.dirty && !self.save_path.as_os_str().is_empty() {
+        if !self.persist {
+            self.dirty = false;
+            self.dirty_frames = 0;
+        } else if self.dirty && !self.save_path.as_os_str().is_empty() {
             if let Err(e) = self.save_to_file() {
                 warn!("Impossibile salvare NVRAM in {:?}: {}", self.save_path, e);
             }
@@ -93,4 +98,4 @@ impl Timekeeper {
     }
 }
 
-opencdi::impl_state!(Timekeeper { ram } skip { dirty, dirty_frames, save_path });
+opencdi::impl_state!(Timekeeper { ram } skip { dirty, dirty_frames, save_path, persist });

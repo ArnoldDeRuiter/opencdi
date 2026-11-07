@@ -205,7 +205,7 @@ fn main() {
                 win_nonzero += audio_buf.iter().filter(|&&(l, r)| l != 0.0 || r != 0.0).count() as u64;
             }
             if sample > 0 && (frame + 1) % sample == 0 {
-                let nb = m.framebuffer().iter().filter(|&&p| p & 0x00E0_E0E0 != 0).count();
+                let nb = m.framebuffer().iter().filter(|&&p| p & 0x00FF_FFFF != 0).count();
                 eprintln!("SAMPLE frame={} nonblack={}", frame + 1, nb);
                 if sample_audio {
                     eprintln!("AUDIO frame={} samples={} nonzero={}", frame + 1, win_samples, win_nonzero);
@@ -248,8 +248,7 @@ fn main() {
     }
 
     let video_last = video_hash(FNV_OFFSET, m.framebuffer());
-    // A pixel counts as non-black when any channel is at least 0x20 (studio black is 16).
-    let nonblack = m.framebuffer().iter().filter(|&&p| p & 0x00E0_E0E0 != 0).count();
+    let nonblack = m.framebuffer().iter().filter(|&&p| p & 0x00FF_FFFF != 0).count();
     if let Some(p) = ppm {
         dump_ppm(m.framebuffer(), p);
     }

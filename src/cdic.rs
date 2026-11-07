@@ -57,6 +57,12 @@ pub const CRC_CCITT_TABLE: [u16; 256] = [
     0x6e17, 0x7e36, 0x4e55, 0x5e74, 0x2e93, 0x3eb2, 0x0ed1, 0x1ef0
 ];
 
+const AUDCTL_FINISHED: u16 = 0x0001;
+const AUDCTL_IDLE_PHASE: u16 = 0x0002;
+const AUDCTL_START: u16 = 0x0800;
+const AUDCTL_IRQ_ENABLE: u16 = 0x2000;
+const AUDIO_MAP_BUFFER0: u16 = 0x2800;
+
 pub struct Cdic {
     pub ram: Box<[u8; CDIC_RAM_SIZE]>,
     pub audio: CdiAudio,
@@ -198,10 +204,15 @@ impl Cdic {
                 temp
             }
             0x3FA => {
-                if !self.decoding_audio_map {
-                    self.z_buffer ^= 0x0001;
+                let flag = self.z_buffer & AUDCTL_FINISHED;
+                if !self.decoding_audio_map && flag == 0 {
+                    // While idle bit 0 alternates, so drivers that wait for it proceed.
+                    self.z_buffer ^= AUDCTL_IDLE_PHASE;
+                    return self.audio_control_value() | (self.z_buffer & AUDCTL_IDLE_PHASE) >> 1;
                 }
-                self.z_buffer
+                let temp = self.audio_control_value();
+                self.z_buffer &= !AUDCTL_FINISHED;
+                temp
             }
             0x3FE => {
                 let temp = self.data_buffer;
@@ -243,24 +254,28 @@ impl Cdic {
                 self.dma_triggered = true;
             }
             0x3FA => {
-                self.z_buffer = val;
-                trace!(
-                    "CDIC WRITE z_buffer = 0x{:04X} (dec_map={}, dec_addr=0x{:04X})",
-                    val, self.decoding_audio_map, self.decode_addr
-                );
-                if (val & 0x2000) == 0 {
-                    self.decode_addr = 0xFFFF;
-                    self.decoding_audio_map = false;
-                } else {
-                    if !self.decoding_audio_map || self.decode_addr == 0xFFFF {
-                        self.decode_addr = val & 0x3A00;
+                trace!("CDIC WRITE audio control = 0x{:04X} (playing={})", val, self.audio_playing());
+                self.z_buffer = val & !AUDCTL_IDLE_PHASE;
+                let disc_adpcm = self.audio_channel != 0 && (val & AUDCTL_IRQ_ENABLE) == 0;
+                if (val & AUDCTL_START) != 0 && !disc_adpcm {
+                    if !self.audio_playing() {
+                        self.decode_addr = AUDIO_MAP_BUFFER0;
                         self.audio_format_sectors = 0;
-                        if self.audio_map_counter == 0 {
+                        let idle = self.audio_map_counter == 0;
+                        if idle {
                             self.audio_map_counter = 1;
                         }
                         self.decoding_audio_map = true;
+                        // An empty map ends at once; real maps start on the next sector tick.
+                        if idle && self.ram[AUDIO_MAP_BUFFER0 as usize + 11] == 0xFF {
+                            self.process_audio_map();
+                        }
                     }
+                } else {
+                    // The buffer in flight plays out; no further buffer is started.
+                    self.decode_addr = 0xFFFF;
                 }
+                self.update_interrupt();
             }
             0x3FC => {
                 trace!("CDIC WRITE interrupt_vector = 0x{:04X}", val);
@@ -274,6 +289,7 @@ impl Cdic {
                 }
                 if (self.data_buffer & 0x4000) == 0 {
                     self.cancel_disc_read();
+                    self.z_buffer &= !AUDCTL_FINISHED;
                 }
             }
             _ => {}
@@ -281,7 +297,20 @@ impl Cdic {
     }
 
     fn update_interrupt(&mut self) {
-        self.irq_pending = ((self.x_buffer | self.audio_buffer) & 0x8000) != 0;
+        let abuf_irq = (self.audio_buffer & 0x8000) != 0 && (self.z_buffer & AUDCTL_IRQ_ENABLE) != 0;
+        self.irq_pending = (self.x_buffer & 0x8000) != 0 || abuf_irq;
+    }
+
+    fn audio_playing(&self) -> bool {
+        self.decoding_audio_map && self.decode_addr != 0xFFFF
+    }
+
+    // Audio control as read: bit 11 shows playback, bit 0 the finished flag.
+    fn audio_control_value(&self) -> u16 {
+        if self.audio_channel != 0 && (self.z_buffer & AUDCTL_IRQ_ENABLE) == 0 {
+            return self.z_buffer & !AUDCTL_IDLE_PHASE;
+        }
+        (self.z_buffer & !AUDCTL_START & !AUDCTL_IDLE_PHASE) | if self.audio_playing() { AUDCTL_START } else { 0 }
     }
 
     fn lba_from_time(&self) -> u32 {
@@ -393,6 +422,11 @@ pub fn get_sector_count_for_coding(coding: u8) -> u8 {
 impl Cdic {
     pub fn process_audio_map(&mut self) {
         if self.decode_addr == 0xFFFF {
+            // Playback was stopped; the buffer in flight has now finished.
+            if self.decoding_audio_map {
+                self.audio_buffer |= 0x8000;
+                self.update_interrupt();
+            }
             self.audio_map_counter = 0;
             self.audio_format_sectors = 0;
             self.decoding_audio_map = false;
@@ -440,10 +474,12 @@ impl Cdic {
             trace!("CDIC AUDIO MAP END: addr=0x{:04X}, coding=0xFF, was_decoding={}", addr, was_decoding);
             self.decode_addr = 0xFFFF;
             self.audio_format_sectors = 0;
+            self.decoding_audio_map = false;
+            self.z_buffer |= AUDCTL_FINISHED;
             if was_decoding {
                 self.audio_buffer |= 0x8000;
-                self.update_interrupt();
             }
+            self.update_interrupt();
         }
     }
 
@@ -595,6 +631,51 @@ impl Cdic {
         }
     }
 
+    // Q subcode of a data or audio sector inside a track, CRC not yet filled in.
+    fn track_q_fields(&self, cd: &CdRom) -> [u8; 12] {
+        let real_lba = self.curr_lba + 150;
+        let mins = (real_lba / (60 * 75)) as u8;
+        let secs = ((real_lba / 75) % 60) as u8;
+        let frac = (real_lba % 75) as u8;
+        let mins_bcd = ((mins / 10) << 4) | (mins % 10);
+        let secs_bcd = ((secs / 10) << 4) | (secs % 10);
+        let frac_bcd = ((frac / 10) << 4) | (frac % 10);
+
+        let (cur_track_num, cur_track_ctrl, rel_lba) = if let Some(t) = cd.tracks.iter().find(|t| self.curr_lba >= t.start_lba && self.curr_lba < t.start_lba + t.length_sectors) {
+            (t.number, t.control, self.curr_lba - t.start_lba)
+        } else {
+            (1, 0x41, self.curr_lba)
+        };
+
+        let rel_msf = rel_lba;
+        let rel_m = (rel_msf / (60 * 75)) as u8;
+        let rel_s = ((rel_msf / 75) % 60) as u8;
+        let rel_f = (rel_msf % 75) as u8;
+        let rel_m_bcd = ((rel_m / 10) << 4) | (rel_m % 10);
+        let rel_s_bcd = ((rel_s / 10) << 4) | (rel_s % 10);
+        let rel_f_bcd = ((rel_f / 10) << 4) | (rel_f % 10);
+        let track_bcd = ((cur_track_num / 10) << 4) | (cur_track_num % 10);
+
+        [
+            cur_track_ctrl, // Control
+            track_bcd,      // Track
+            0x01,           // Index
+            rel_m_bcd, rel_s_bcd, rel_f_bcd, // Track relative MSF
+            0x00,
+            mins_bcd, secs_bcd, frac_bcd,    // Absolute disc MSF
+            0xFF, 0xFF // CRC (init)
+        ]
+    }
+
+    fn add_q_crc(subcode: &mut [u8; 12]) {
+        let mut crc_accum: u16 = 0;
+        for i in 0..12 {
+            crc_accum = ((crc_accum << 8) | (subcode[i] as u16)) ^ CRC_CCITT_TABLE[(crc_accum >> 8) as usize];
+        }
+        subcode[10] = (crc_accum >> 8) as u8;
+        subcode[11] = (crc_accum & 0xFF) as u8;
+    }
+
     fn process_sector(&mut self, cdrom: &mut Option<CdRom>) {
         info!("CDIC process_sector: LBA={}, mode={}", self.curr_lba, self.disc_mode);
         let Some(cd) = cdrom else {
@@ -728,38 +809,10 @@ impl Cdic {
                 0xFF,        // [11] CRC1 (init)
             ]
         } else {
-            let (cur_track_num, cur_track_ctrl, rel_lba) = if let Some(t) = cd.tracks.iter().find(|t| self.curr_lba >= t.start_lba && self.curr_lba < t.start_lba + t.length_sectors) {
-                (t.number, t.control, self.curr_lba - t.start_lba)
-            } else {
-                (1, 0x41, self.curr_lba)
-            };
-
-            let rel_msf = rel_lba;
-            let rel_m = (rel_msf / (60 * 75)) as u8;
-            let rel_s = ((rel_msf / 75) % 60) as u8;
-            let rel_f = (rel_msf % 75) as u8;
-            let rel_m_bcd = ((rel_m / 10) << 4) | (rel_m % 10);
-            let rel_s_bcd = ((rel_s / 10) << 4) | (rel_s % 10);
-            let rel_f_bcd = ((rel_f / 10) << 4) | (rel_f % 10);
-            let track_bcd = ((cur_track_num / 10) << 4) | (cur_track_num % 10);
-
-            [
-                cur_track_ctrl, // Control
-                track_bcd,      // Track
-                0x01,           // Index
-                rel_m_bcd, rel_s_bcd, rel_f_bcd, // Track relative MSF
-                0x00,
-                mins_bcd, secs_bcd, frac_bcd,    // Absolute disc MSF
-                0xFF, 0xFF // CRC (init)
-            ]
+            self.track_q_fields(cd)
         };
 
-        let mut crc_accum: u16 = 0;
-        for i in 0..12 {
-            crc_accum = ((crc_accum << 8) | (subcode[i] as u16)) ^ CRC_CCITT_TABLE[(crc_accum >> 8) as usize];
-        }
-        subcode[10] = (crc_accum >> 8) as u8;
-        subcode[11] = (crc_accum & 0xFF) as u8;
+        Self::add_q_crc(&mut subcode);
 
         // Store into CDIC RAM
         self.data_buffer ^= 0x0001;
@@ -843,5 +896,89 @@ mod tests {
         assert!(c.is_mode2_audio_selected(&buf));
         buf[21] = 17;
         assert!(!c.is_mode2_audio_selected(&buf));
+    }
+
+    const SECTOR_TICKS: u32 = 1000;
+
+    fn tick(c: &mut Cdic, n: u32) {
+        let mut cd = None;
+        for _ in 0..n {
+            c.step_cycles(SECTOR_TICKS, SECTOR_TICKS, &mut cd);
+        }
+    }
+
+    fn put_map(c: &mut Cdic, addr: usize, coding: u8) {
+        c.ram[addr + 11] = coding;
+    }
+
+    #[test]
+    fn audctl_start_reads_back_bit_11_and_ignores_a_second_start() {
+        let mut c = Cdic::new();
+        put_map(&mut c, 0x2800, 0x01);
+        c.write_reg(0x3FA, 0x2800);
+        assert_eq!(c.read_reg(0x3FA) & 0x0800, 0x0800);
+        tick(&mut c, 1);
+        let addr = c.decode_addr;
+        c.write_reg(0x3FA, 0x2800);
+        assert_eq!(c.decode_addr, addr);
+    }
+
+    #[test]
+    fn audctl_bit_13_gates_the_buffer_interrupt() {
+        let mut c = Cdic::new();
+        c.audio_channel = 0;
+        put_map(&mut c, 0x2800, 0x01);
+        c.write_reg(0x3FA, 0x0800);
+        tick(&mut c, 1);
+        assert_ne!(c.audio_buffer & 0x8000, 0);
+        assert!(!c.irq_pending);
+        c.write_reg(0x3FA, 0x2800);
+        assert!(c.irq_pending);
+    }
+
+    #[test]
+    fn audctl_write_zero_lets_the_buffer_in_flight_play_out() {
+        let mut c = Cdic::new();
+        put_map(&mut c, 0x2800, 0x01);
+        c.write_reg(0x3FA, 0x2800);
+        tick(&mut c, 1);
+        let queued = c.audio.sfx.len();
+        assert!(queued > 0);
+        c.audio_buffer = 0;
+        c.write_reg(0x3FA, 0x0000);
+        assert!(c.decoding_audio_map);
+        assert_eq!(c.read_reg(0x3FA) & 0x0800, 0);
+        assert_eq!(c.audio.sfx.len(), queued);
+        let left = c.audio_map_counter as u32;
+        tick(&mut c, left + 1);
+        assert!(!c.decoding_audio_map);
+        assert_ne!(c.audio_buffer & 0x8000, 0);
+    }
+
+    #[test]
+    fn audctl_start_with_a_disc_audio_channel_selected_leaves_the_map_alone() {
+        let mut c = Cdic::new();
+        c.audio_channel = 0x0002;
+        put_map(&mut c, 0x2800, 0x01);
+        c.write_reg(0x3FA, 0x0800);
+        assert!(!c.decoding_audio_map);
+        assert_eq!(c.read_reg(0x3FA) & 0x0800, 0x0800);
+    }
+
+    #[test]
+    fn audctl_finished_flag_is_set_at_coding_ff_and_cleared_by_a_read() {
+        let mut c = Cdic::new();
+        put_map(&mut c, 0x2800, 0xFF);
+        c.write_reg(0x3FA, 0x2800);
+        assert!(!c.decoding_audio_map);
+        assert_eq!(c.read_reg(0x3FA) & 0x0801, 0x0001);
+        assert_eq!(c.z_buffer & 0x0001, 0);
+    }
+
+    #[test]
+    fn audctl_bit_0_alternates_while_idle() {
+        let mut c = Cdic::new();
+        let bits: Vec<u16> = (0..4).map(|_| c.read_reg(0x3FA) & 1).collect();
+        assert_eq!(bits, [1, 0, 1, 0]);
     }
 }

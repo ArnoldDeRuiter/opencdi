@@ -493,8 +493,7 @@ impl CdiBus {
         }
     }
 
-    // Mono-IV: a channel 0 start marks the channel active; the complete bit comes when the CIAP copy ends.
-    // Mono-IV: a channel 0 start while the previous one never got its CIAP copy is reported once.
+    // Mono-IV: a channel 0 start marks the channel active and the CIAP copy sets the complete bit; a restart while active is reported once.
     fn mono4_dma_start(&mut self, offset: u32, value: u16, was_active: bool) {
         if self.board == BoardKind::Mono4 && offset == 0x06 && value & 0x80 != 0 && was_active {
             if let Some(m) = self.mono4.as_deref_mut() {

@@ -273,12 +273,16 @@ fn save_screenshot(frame_count: u64, framebuffer: &[u32]) {
     }
 }
 
-// Savestates go into states/ next to the binary
+// Savestates go into local/states when run from the repo, else states/ next to the binary
 fn states_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("states")))
-        .unwrap_or_else(|| PathBuf::from("states"))
+    if Path::new("local").is_dir() {
+        PathBuf::from("local").join("states")
+    } else {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("states")))
+            .unwrap_or_else(|| PathBuf::from("states"))
+    }
 }
 
 // RetroArch naming: slot 0 is <name>.state, slot N is <name>.stateN
@@ -307,12 +311,16 @@ fn read_state_file(path: &Path, m: &mut Machine) -> Result<Vec<u8>, String> {
     m.load_state(&data).map(|fe| fe.to_vec()).map_err(|e: StateError| e.to_string())
 }
 
-// F8: binary PPM (no image crate needed) into screenshots/ next to the binary
+// F8: binary PPM (no image crate needed) into local/screenshots when run from the repo, else screenshots/ next to the binary
 fn save_screenshot_ppm(frame_count: u64, framebuffer: &[u32]) {
-    let dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("screenshots")))
-        .unwrap_or_else(|| PathBuf::from("screenshots"));
+    let dir = if Path::new("local").is_dir() {
+        PathBuf::from("local").join("screenshots")
+    } else {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("screenshots")))
+            .unwrap_or_else(|| PathBuf::from("screenshots"))
+    };
     if let Err(e) = std::fs::create_dir_all(&dir) {
         error!("Cannot create screenshot directory {:?}: {}", dir, e);
         return;

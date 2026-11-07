@@ -327,8 +327,7 @@ impl Ikat {
     // Port D: drive commands, four bytes, command byte first with bit 7 set.
     fn execute_d(&mut self, cmd: &[u8], pc: u32) {
         match cmd[0] {
-            // Status: no reply while the drive seeks or reads.
-            // Start-up status: not answered on this IKAT release.
+            // Status: no reply while the drive seeks or reads; the start-up status is not answered.
             0xA1 => {}
             0xB0 if self.drive_busy => {
                 if self.trace || self.loud.first(0x5_0000) {

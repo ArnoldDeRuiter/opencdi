@@ -335,7 +335,7 @@ pub fn inspect(mut data: Vec<u8>) -> BiosImage {
             Status::Ok
         };
         if k.board == Board::Mono4 {
-            msg += "; the Mono-IV board is experimental and is only picked when no Mono-I system ROM is found";
+            msg += "; the Mono-IV board is experimental";
         } else if !k.board.emulated() {
             msg += &format!("; the {} board is not emulated yet, so it will not boot", k.board.name());
         }

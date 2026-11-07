@@ -19,6 +19,7 @@ use opencdi::frontend::{pop_action, push_action, GuiAction, InputDeviceMode, Key
 #[cfg(target_os = "windows")]
 use opencdi::gui;
 use opencdi::bios;
+use opencdi::bus::BoardKind;
 use opencdi::machine::Machine;
 use opencdi::mcd212::{SCREEN_WIDTH, SCREEN_HEIGHT, VideoMode};
 use opencdi::savestate::{Reader, State, StateError};
@@ -88,15 +89,31 @@ Usage: opencdi [options] [disc image (cue, chd, iso, bin)]
   --recent [n]        List the recent disc images, or boot recent image number n
   --no-host-input     Ignore host keyboard, mouse and gamepads; never grab the cursor
   --bios, --standalone  Boot the BIOS shell without a disc
+  --board mono1|mono4 Console board (default mono1; mono4 is the CD-i 490, give --rom its BIOS)
   --dvc <path>        Digital Video Cartridge ROM (default: search dvc/, bios/, the current and the program directory)
   --no-dvc, --nodvc   Boot without the Digital Video Cartridge
   --slave-debug       Log slave (mouse channel) bytes
-  --nvram <path>      Console NVRAM save file (default: bios/nvram_mk48t08.bin or nvram_mk48t08.bin)
+  --nvram <path>      Console NVRAM save file (default: bios/nvram_mk48t08.bin or nvram_mk48t08.bin; 490: nvram_cdi490a.bin)
   --run-in-menu       Windows: keep emulating while a menu or dialog is open, or the window is moved (default: paused)
   --console           Windows: show the log in the parent console or a new console window
   --help, -h          Show this text
 ";
 
+
+fn default_nvram490_save_path() -> PathBuf {
+    if Path::new("bios").is_dir() {
+        return PathBuf::from("bios/nvram_cdi490a.bin");
+    }
+    PathBuf::from("nvram_cdi490a.bin")
+}
+
+// Write whichever board NVRAM changed to its file
+fn flush_nvram(bus: &mut opencdi::bus::CdiBus) {
+    bus.nvram.flush_if_dirty();
+    if let Some(m4) = bus.mono4.as_deref_mut() {
+        m4.nvram.flush_if_dirty();
+    }
+}
 
 fn default_nvram_save_path() -> PathBuf {
     if let Some(p) = find_nvram_file() {
@@ -106,6 +123,14 @@ fn default_nvram_save_path() -> PathBuf {
         return PathBuf::from("bios/nvram_mk48t08.bin");
     }
     PathBuf::from("nvram_mk48t08.bin")
+}
+
+// Pointer and buttons go to the IKAT on the Mono-IV board, to the slave otherwise
+fn send_pointer(bus: &mut opencdi::bus::CdiBus, x: i32, y: i32, buttons: u8) {
+    match bus.mono4.as_deref_mut() {
+        Some(m4) => m4.ikat.update_pointer(x, y, buttons),
+        None => bus.slave.update_mouse(x, y, buttons),
+    }
 }
 
 fn find_file(relative_subpath: &str) -> Option<PathBuf> {
@@ -162,7 +187,7 @@ fn find_bios_rom() -> Option<PathBuf> {
         "bios/cdi490a.zip",
         "cdi490a.zip",
     ];
-    // Each found file is checked; the best one wins and a Mono-IV image is still the last resort.
+    // Each found file is checked; the best one wins.
     let mut seen = HashSet::new();
     let found = BIOS_CANDIDATES.iter().filter_map(|n| find_file(n)).filter(|p| seen.insert(p.clone())).filter_map(|p| {
         match Machine::read_bios(&p) {
@@ -248,16 +273,12 @@ fn save_screenshot(frame_count: u64, framebuffer: &[u32]) {
     }
 }
 
-// Savestates go into local/states when run from the repo, else states/ next to the binary
+// Savestates go into states/ next to the binary
 fn states_dir() -> PathBuf {
-    if Path::new("local").is_dir() {
-        PathBuf::from("local").join("states")
-    } else {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("states")))
-            .unwrap_or_else(|| PathBuf::from("states"))
-    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("states")))
+        .unwrap_or_else(|| PathBuf::from("states"))
 }
 
 // RetroArch naming: slot 0 is <name>.state, slot N is <name>.stateN
@@ -286,16 +307,12 @@ fn read_state_file(path: &Path, m: &mut Machine) -> Result<Vec<u8>, String> {
     m.load_state(&data).map(|fe| fe.to_vec()).map_err(|e: StateError| e.to_string())
 }
 
-// F8: binary PPM (no image crate needed) into local/screenshots when run from the repo, else screenshots/ next to the binary
+// F8: binary PPM (no image crate needed) into screenshots/ next to the binary
 fn save_screenshot_ppm(frame_count: u64, framebuffer: &[u32]) {
-    let dir = if Path::new("local").is_dir() {
-        PathBuf::from("local").join("screenshots")
-    } else {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("screenshots")))
-            .unwrap_or_else(|| PathBuf::from("screenshots"))
-    };
+    let dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("screenshots")))
+        .unwrap_or_else(|| PathBuf::from("screenshots"));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         error!("Cannot create screenshot directory {:?}: {}", dir, e);
         return;
@@ -350,6 +367,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rom_arg = flag_value("--rom").map(PathBuf::from);
     let max_frames: Option<u64> = flag_value("--frames").and_then(|s| s.parse().ok());
 
+    let board = flag_value("--board").map(|v| BoardKind::parse(&v).unwrap_or_else(|| {
+        eprintln!("--board takes mono1 or mono4");
+        std::process::exit(2);
+    }));
+
     let mut m = Machine::new();
     m.bus.slave.debug_log = has_flag("--slave-debug");
     if m.bus.slave.debug_log {
@@ -363,14 +385,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let error_msg =
                 "OpenCDi - Required System BIOS Missing\n\
                 ======================================\n\n\
-                The emulator cannot start because no usable Philips CD-i system BIOS ROM was found (see the log and doc/bios-dumping.md).\n\n\
+                The emulator cannot start because no usable Philips CD-i system BIOS ROM was found (see the log).\n\n\
                 Recommended File:\n\
                   • cdi220b.rom (512 KB, Philips CD-i 220 European PAL BIOS)\n\
                     SHA-1: 53360A1F21DDAC952E95306CED64186A3FC0B93E\n\
                     MD5:   AC0D468BE366779C9DF633BE98DA250A\n\n\
                 Alternative Supported BIOSes:\n\
                   • cdi200.rom, cdi.rom, cdimono1.zip / cdibios.zip\n\
-                  • cdi220.rom is a truncated dump; cdi490a.rom (CD-i 490) is experimental\n\n\
+                  • cdi220.rom is a truncated dump; cdi490a.rom is not emulated yet\n\n\
                 Where to place the BIOS ROM:\n\
                   1. In a 'bios/' subfolder next to opencdi.exe\n\
                   2. OR directly in the same folder as opencdi.exe\n\
@@ -411,11 +433,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    if let Some(b) = board {
+        m.bus.set_board(b);
+    }
+
     // 2. Load NVRAM if present
     let nvram_arg = args.iter().position(|a| a == "--nvram").and_then(|i| args.get(i + 1)).map(PathBuf::from);
-    let resolved_nvram_path = nvram_arg.unwrap_or_else(default_nvram_save_path);
-    m.bus.nvram.save_path = resolved_nvram_path.clone();
-    if resolved_nvram_path.is_file() {
+    let mono4_nvram = m.bus.mono4.is_some();
+    let resolved_nvram_path = nvram_arg.unwrap_or_else(if mono4_nvram { default_nvram490_save_path } else { default_nvram_save_path });
+    if let Some(m4) = m.bus.mono4.as_deref_mut() {
+        match m4.nvram.attach_file(&resolved_nvram_path) {
+            Ok(true) => info!("Mono-IV NVRAM loaded from {:?}", resolved_nvram_path),
+            Ok(false) => info!("Mono-IV NVRAM starts empty, saved to {:?}", resolved_nvram_path),
+            Err(e) => log::warn!("Cannot load Mono-IV NVRAM from {:?}: {}", resolved_nvram_path, e),
+        }
+    } else {
+        m.bus.nvram.save_path = resolved_nvram_path.clone();
+    }
+    if m.bus.mono4.is_none() && resolved_nvram_path.is_file() {
         if let Err(e) = m.bus.nvram.load_from_file(&resolved_nvram_path) {
             log::warn!("Impossibile caricare NVRAM da {:?}: {:?}", resolved_nvram_path, e);
         } else {
@@ -445,7 +480,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut disc_arg = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--rom" || a == "--frames" || a == "--dvc" || (a == "--recent" && recent_pick.is_some()) {
+        if a == "--rom" || a == "--frames" || a == "--dvc" || a == "--board" || (a == "--recent" && recent_pick.is_some()) {
             it.next();
         } else if !a.starts_with("--") {
             disc_arg = Some(a.clone());
@@ -479,7 +514,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     info!("Detected NTSC disc (USA/Japan): auto-configured NTSC 60 Hz video mode");
                     m.bus.set_video_mode(VideoMode::Ntsc);
                 } else {
-                    info!("Console booted in standard PAL 50 Hz mode (CD-i 220 BIOS)");
+                    info!("Console booted in standard PAL 50 Hz mode");
                     m.bus.set_video_mode(VideoMode::Pal);
                 }
             }
@@ -539,6 +574,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         focused: false,
         cursor: None,
         rel_pointer: None,
+        rel_over: (0.0, 0.0),
         mouse_left: false,
         mouse_right: false,
         mouse_middle: false,
@@ -587,7 +623,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         timeEndPeriod(1);
     }
 
-    app.m.bus.nvram.flush_if_dirty();
+    flush_nvram(&mut app.m.bus);
     info!("Emulation stopped. Final PC: 0x{:08X}", app.m.cpu.pc);
     Ok(())
 }
@@ -685,6 +721,7 @@ struct App {
     focused: bool,
     cursor: Option<PhysicalPosition<f64>>,
     rel_pointer: Option<(f64, f64)>,
+    rel_over: (f64, f64), // raw mouse motion past the screen edge since the last frame, in CD-i pixels
     mouse_left: bool,
     mouse_right: bool,
     mouse_middle: bool,
@@ -1106,9 +1143,13 @@ impl App {
                     self.refresh_title();
                 }
                 GuiAction::ClearNvram => {
-                    let _ = self.m.bus.nvram.clear();
-                    if let Some(ref path) = self.nvram_path {
-                        let _ = std::fs::remove_file(path);
+                    if let Some(m4) = self.m.bus.mono4.as_deref_mut() {
+                        m4.nvram.clear();
+                    } else {
+                        let _ = self.m.bus.nvram.clear();
+                        if let Some(ref path) = self.nvram_path {
+                            let _ = std::fs::remove_file(path);
+                        }
                     }
                     self.m.bus.reset_system();
                     self.m.cpu.reset(&mut self.m.bus);
@@ -1141,15 +1182,16 @@ impl App {
                 (0x0000C000u32, m.bus.peek_long(0x0000C000u32.wrapping_add(0xFFFF9172)).unwrap_or(0))
             };
 
-            if shell_state >= 2 {
+            // The shell click targets the Mono-I shell; on the 490 the user clicks Play
+            if shell_state >= 2 && m.bus.mono4.is_none() {
                 self.shell_ready_count += 1;
                 if self.shell_ready_count == 1 || self.shell_ready_count == 150 {
-                    m.bus.slave.update_mouse(575, 335, 0);
+                    send_pointer(&mut m.bus, 575, 335, 0);
                 } else if self.shell_ready_count == 30 || self.shell_ready_count == 180 {
                     info!("Shell BIOS pronta (stato {}): avvio automatico disco CD-i (click PLAY CD-I)...", shell_state);
-                    m.bus.slave.update_mouse(575, 335, 1);
+                    send_pointer(&mut m.bus, 575, 335, 1);
                 } else if self.shell_ready_count == 50 || self.shell_ready_count == 200 {
-                    m.bus.slave.update_mouse(575, 335, 0);
+                    send_pointer(&mut m.bus, 575, 335, 0);
                 }
             }
             if ((m.cpu.pc >= 0x00010000 && m.cpu.pc < 0x00300000) || (m.cpu.pc >= 0x00D00000 && m.cpu.pc < 0x00E00000)) && self.frame_count > 250 {
@@ -1160,7 +1202,7 @@ impl App {
                 self.pad_y = 280;
                 self.pad_x_f = 384.0;
                 self.pad_y_f = 280.0;
-                m.bus.slave.update_mouse(384, 280, 0);
+                send_pointer(&mut m.bus, 384, 280, 0);
             }
         }
     }
@@ -1284,6 +1326,9 @@ impl App {
         let mut mouse_btn = 0;
         let mut mouse_x = self.pad_x;
         let mut mouse_y = self.pad_y;
+        // Whole pixels go out this frame, the fraction carries over so slow drags at the edge still count
+        let rel_over = (self.rel_over.0.round(), self.rel_over.1.round());
+        self.rel_over = (self.rel_over.0 - rel_over.0, self.rel_over.1 - rel_over.1);
 
         if is_active && self.mouse_captured {
             if let Some((x, y)) = self.rel_pointer {
@@ -1309,25 +1354,34 @@ impl App {
             }
         }
 
-        if !self.disc_launched && m.bus.cdrom.is_some() {
+        if !self.disc_launched && m.bus.cdrom.is_some() && m.bus.mono4.is_none() {
             // During automatic boot sequence, do not let host mouse drift override PLAY CD-I auto-click
         } else {
             match self.input_device_mode {
                 InputDeviceMode::Gamepad => {
                     const PAD_SPEED: f32 = 2.5;
                     let mut moved = false;
+                    let mut over = (0.0f32, 0.0f32);
                     if dir_x != 0 {
-                        self.pad_x_f = (self.pad_x_f + (dir_x.clamp(-1, 1) as f32) * PAD_SPEED).clamp(0.0, 767.0);
+                        let x = self.pad_x_f + (dir_x.clamp(-1, 1) as f32) * PAD_SPEED;
+                        self.pad_x_f = x.clamp(0.0, 767.0);
+                        over.0 = x - self.pad_x_f;
                         self.pad_x = self.pad_x_f.round() as i32;
                         moved = true;
                     }
                     if dir_y != 0 {
-                        self.pad_y_f = (self.pad_y_f + (dir_y.clamp(-1, 1) as f32) * PAD_SPEED).clamp(0.0, 559.0);
+                        let y = self.pad_y_f + (dir_y.clamp(-1, 1) as f32) * PAD_SPEED;
+                        self.pad_y_f = y.clamp(0.0, 559.0);
+                        over.1 = y - self.pad_y_f;
                         self.pad_y = self.pad_y_f.round() as i32;
                         moved = true;
                     }
                     if moved || key_btn != self.prev_key_btn {
-                        m.bus.slave.update_mouse(self.pad_x, self.pad_y, key_btn);
+                        send_pointer(&mut m.bus, self.pad_x, self.pad_y, key_btn);
+                    }
+                    // The 490 reports relative moves, so a direction held against the screen edge keeps moving
+                    if let Some(m4) = m.bus.mono4.as_deref_mut() {
+                        m4.ikat.push_pointer(over.0.round() as i32, over.1.round() as i32);
                     }
                     self.prev_key_btn = key_btn;
                 }
@@ -1336,7 +1390,10 @@ impl App {
                     self.pad_y = mouse_y;
                     self.pad_x_f = mouse_x as f32;
                     self.pad_y_f = mouse_y as f32;
-                    m.bus.slave.update_mouse(self.pad_x, self.pad_y, mouse_btn | key_btn);
+                    send_pointer(&mut m.bus, self.pad_x, self.pad_y, mouse_btn | key_btn);
+                    if let Some(m4) = m.bus.mono4.as_deref_mut() {
+                        m4.ikat.push_pointer(rel_over.0 as i32, rel_over.1 as i32);
+                    }
                 }
             }
         }
@@ -1466,7 +1523,7 @@ impl App {
         self.autoplay();
         self.m.run_frame();
         if self.frame_count % 300 == 0 {
-            self.m.bus.nvram.flush_if_dirty();
+            flush_nvram(&mut self.m.bus);
         }
 
         let curr_vsr = (self.m.bus.mcd212.get_vsr::<0>(), self.m.bus.mcd212.get_vsr::<1>());
@@ -1673,8 +1730,10 @@ impl ApplicationHandler for App {
         if let (DeviceEvent::MouseMotion { delta: (dx, dy) }, Some((x, y))) = (event, self.rel_pointer) {
             let (_, _, w, h) = self.image_rect;
             if w > 0 && h > 0 {
-                let x = (x + dx * SCREEN_WIDTH as f64 / w as f64).clamp(0.0, (SCREEN_WIDTH - 1) as f64);
-                let y = (y + dy * SCREEN_HEIGHT as f64 / h as f64).clamp(0.0, (SCREEN_HEIGHT - 1) as f64);
+                let (nx, ny) = (x + dx * SCREEN_WIDTH as f64 / w as f64, y + dy * SCREEN_HEIGHT as f64 / h as f64);
+                let x = nx.clamp(0.0, (SCREEN_WIDTH - 1) as f64);
+                let y = ny.clamp(0.0, (SCREEN_HEIGHT - 1) as f64);
+                self.rel_over = (self.rel_over.0 + nx - x, self.rel_over.1 + ny - y);
                 self.rel_pointer = Some((x, y));
             }
         }
@@ -1727,6 +1786,13 @@ impl ApplicationHandler for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn board_flag_values() {
+        assert_eq!(BoardKind::parse("mono1"), Some(BoardKind::Mono1));
+        assert_eq!(BoardKind::parse("mono4"), Some(BoardKind::Mono4));
+        assert_eq!(BoardKind::parse("490"), None);
+    }
 
     #[test]
     fn letterbox_matches_aspect_stretch() {

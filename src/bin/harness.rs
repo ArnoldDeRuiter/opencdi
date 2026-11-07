@@ -44,7 +44,7 @@ fn dump_ppm(fb: &[u32], path: &str) {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: harness <bios.rom> <disc|none> <frames> [--dvc <rom>] [--ppm <out.ppm>] [--ntsc] [--autoplay [--print-autoplay-script]] [--input <script|@file>] [--sample <n> [--sample-audio]] [--dump-every <n> <prefix>] [--roundtrip <frame>] [--nvram-out <file>] [--counters] [--idle-pc <hex>] [--board mono1|mono4] [--audio-out <file.s16>]");
+    eprintln!("usage: harness <bios.rom> <disc|none> <frames> [--dvc <rom>] [--ppm <out.ppm>] [--ntsc] [--autoplay [--print-autoplay-script]] [--input <script|@file>] [--sample <n> [--sample-audio]] [--dump-every <n> <prefix>] [--roundtrip <frame>] [--nvram-out <file>] [--counters] [--idle-pc <hex>] [--board mono1|mono4] [--video-levels full|studio] [--audio-out <file.s16>]");
     std::process::exit(2);
 }
 
@@ -82,6 +82,14 @@ fn main() {
             "--board" => {
                 i += 1;
                 board = Some(a.get(i).and_then(|s| BoardKind::parse(s)).unwrap_or_else(|| usage()));
+            }
+            "--video-levels" => {
+                i += 1;
+                match a.get(i).map(|s| s.as_str()) {
+                    Some("full") => opencdi::mcd212::set_studio_levels(false),
+                    Some("studio") => opencdi::mcd212::set_studio_levels(true),
+                    _ => usage(),
+                }
             }
             "--idle-pc" => { i += 1; idle_pc = Some(a.get(i).and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok()).unwrap_or_else(|| usage())); }
             "--autoplay" => autoplay = true,

@@ -46,6 +46,7 @@ struct LoadSpec {
 
 const OPT_DVC: &CStr = c"opencdi_dvc";
 const OPT_MONO4: &CStr = c"opencdi_mono4";
+const OPT_LEVELS: &CStr = c"opencdi_video_levels";
 const NO_VALUE: retro_core_option_value = retro_core_option_value { value: std::ptr::null(), label: std::ptr::null() };
 
 const fn option_values(list: &[(&CStr, &CStr)]) -> [retro_core_option_value; RETRO_NUM_CORE_OPTION_VALUES_MAX] {
@@ -59,7 +60,7 @@ const fn option_values(list: &[(&CStr, &CStr)]) -> [retro_core_option_value; RET
 }
 
 // Core options v1, terminated by an empty entry; frontends without v1 get VARIABLES below.
-static OPTIONS: Table<[retro_core_option_definition; 3]> = Table([
+static OPTIONS: Table<[retro_core_option_definition; 4]> = Table([
     retro_core_option_definition {
         key: OPT_DVC.as_ptr(),
         desc: c"DVC cartridge (restart)".as_ptr(),
@@ -74,11 +75,19 @@ static OPTIONS: Table<[retro_core_option_definition; 3]> = Table([
         values: option_values(&[(c"off", c"off"), (c"on", c"on")]),
         default_value: c"off".as_ptr(),
     },
+    retro_core_option_definition {
+        key: OPT_LEVELS.as_ptr(),
+        desc: c"Video levels (restart)".as_ptr(),
+        info: c"full stretches the CD-i video levels (black 16, white 235) to 0-255, as PC displays expect. studio passes the levels through unchanged, so black shows as 16, for comparing against captures in limited range. Takes effect when content is loaded.".as_ptr(),
+        values: option_values(&[(c"full", c"full"), (c"studio", c"studio")]),
+        default_value: c"full".as_ptr(),
+    },
     retro_core_option_definition { key: std::ptr::null(), desc: std::ptr::null(), info: std::ptr::null(), values: [NO_VALUE; RETRO_NUM_CORE_OPTION_VALUES_MAX], default_value: std::ptr::null() },
 ]);
-static VARIABLES: Table<[retro_variable; 3]> = Table([
+static VARIABLES: Table<[retro_variable; 4]> = Table([
     retro_variable { key: OPT_DVC.as_ptr(), value: c"DVC cartridge (restart); auto|off".as_ptr() },
     retro_variable { key: OPT_MONO4.as_ptr(), value: c"CD-i 490 BIOS, experimental (restart); off|on".as_ptr() },
+    retro_variable { key: OPT_LEVELS.as_ptr(), value: c"Video levels (restart); full|studio".as_ptr() },
     retro_variable { key: std::ptr::null(), value: std::ptr::null() },
 ]);
 
@@ -659,6 +668,7 @@ pub extern "C" fn retro_cheat_set(_index: c_uint, _enabled: bool, _code: *const 
 fn load(game: *const retro_game_info) -> Result<(), String> {
     unload();
     let dir = system_directory().ok_or("frontend gave no system directory")?;
+    opencdi::mcd212::set_studio_levels(option_value(OPT_LEVELS).as_deref() == Some("studio"));
     let allow_mono4 = option_value(OPT_MONO4).as_deref() == Some("on");
     let bios = find_bios(&dir, allow_mono4).inspect_err(|e| show_message(e))?;
     let mut temp = None;

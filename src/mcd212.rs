@@ -1,3 +1,14 @@
+static STUDIO_LEVELS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Selects studio-level output (black 16, white 235 passed through) instead of the full-range stretch.
+pub fn set_studio_levels(on: bool) {
+    STUDIO_LEVELS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn studio_levels() -> bool {
+    STUDIO_LEVELS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub const SCREEN_WIDTH: usize = 768;
 pub const SCREEN_HEIGHT: usize = 560;
 pub const TOTAL_SCANLINES: usize = 312;
@@ -1123,6 +1134,7 @@ impl Mcd212 {
 
         let order_ab = (self.plane_order & 1) == 0;
         let width = 768;
+        let studio = studio_levels();
 
         for x in 0..width {
             if transparent_a[x] && transparent_b[x] {
@@ -1172,9 +1184,15 @@ impl Mcd212 {
             let mixed_g = (weighted_a_g + weighted_b_g + 16).clamp(0, 255);
             let mixed_b = (weighted_a_b + weighted_b_b + 16).clamp(0, 255);
 
-            let out_r = (((mixed_r - 16) * 298 + 128) >> 8).clamp(0, 255) as u32;
-            let out_g = (((mixed_g - 16) * 298 + 128) >> 8).clamp(0, 255) as u32;
-            let out_b = (((mixed_b - 16) * 298 + 128) >> 8).clamp(0, 255) as u32;
+            let (out_r, out_g, out_b) = if studio {
+                (mixed_r as u32, mixed_g as u32, mixed_b as u32)
+            } else {
+                (
+                    (((mixed_r - 16) * 298 + 128) >> 8).clamp(0, 255) as u32,
+                    (((mixed_g - 16) * 298 + 128) >> 8).clamp(0, 255) as u32,
+                    (((mixed_b - 16) * 298 + 128) >> 8).clamp(0, 255) as u32,
+                )
+            };
 
             out[x] = 0xFF00_0000 | (out_r << 16) | (out_g << 8) | out_b;
         }

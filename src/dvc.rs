@@ -1788,7 +1788,7 @@ impl Dvc {
     pub fn get_scanline(&self, active_line: usize, out: &mut [u32; 768], present: &mut [bool; 768]) {
         present.fill(false);
         if !self.has_valid_frame {
-            out.fill(0xFF00_0000);
+            out.fill(crate::mcd212::fixed_color_out(0xFF00_0000));
             return;
         }
         out.fill(self.border_color);

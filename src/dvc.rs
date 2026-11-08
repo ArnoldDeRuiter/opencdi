@@ -65,9 +65,6 @@ pub const FMA_IRQ_DEC: u16   = 1 << 2;  // 0x0004: Decoded data ready
 pub const FMA_IRQ_PLAY: u16  = 1 << 4;  // 0x0010: Playback active
 pub const FMA_IRQ_POLL: u16  = 1 << 8;  // 0x0100: Timer tick
 
-// The first frame decoded after a parser reset plays as silence (one switch).
-const FMA_SILENT_FIRST_FRAME: bool = true;
-
 // =========================================================================
 // MPEG Audio Layer-II Decoder (oxideav-mp2)
 // =========================================================================
@@ -1549,9 +1546,6 @@ impl Dvc {
 
     fn raise_fma_underflow(&mut self) {
         trace!(">>> [DVC FMA] AUDIO BUFFER UNDERFLOW (raising FMA_IRQ_UNF)");
-        if !self.fma_started && std::env::var_os("CDI_FMA_TRACE").is_some() {
-            log::warn!("DVC FMA underflow before the first decoded frame");
-        }
         self.fma_pending |= FMA_IRQ_UNF;
     }
 
@@ -1623,10 +1617,9 @@ impl Dvc {
             if !self.fma_started {
                 self.fma_started = true;
                 self.fma_pending |= FMA_IRQ_PLAY;
-                if FMA_SILENT_FIRST_FRAME {
-                    for s in self.mp2.pcm.iter_mut() {
-                        *s = (0.0, 0.0);
-                    }
+                // The first frame decoded after a parser reset plays as silence.
+                for s in self.mp2.pcm.iter_mut() {
+                    *s = (0.0, 0.0);
                 }
             }
             let header = u32::from_be_bytes(f.header) & !0x0300;
@@ -1945,80 +1938,6 @@ mod window_tests {
 }
 
 #[cfg(test)]
-mod impeg_tests {
-    use super::*;
-
-    #[test]
-    fn impeg_audio_bits_pio_and_state() {
-        assert_eq!(Dvc::impeg_bits_from(0x0100 | 0x0008 | 0x0020 | 0x0001 | 0x0004), 0x0800 | 0x0100 | 0x0400 | 0x8000 | 0x0004);
-        assert_eq!(Dvc::impeg_bits_to(0x3D14), 0x0100 | 0x0020 | 0x0008 | 0x0010 | 0x0004);
-        let mut d = Dvc::new();
-        d.impeg = true;
-        d.write_word(0xE0421C, 0x3D14);
-        assert_eq!(d.read_word(0xE0421C), 0x3D14);
-        assert_eq!(d.get_fma_word(FMA_IER), Dvc::impeg_bits_to(0x3D14));
-        // Data-port words go to the stream only in PIO mode and only as complete words.
-        let before = d.fma_stream_fifo.len();
-        d.write_word(0xE0411E, 0x1234);
-        assert_eq!(d.fma_stream_fifo.len(), before);
-        d.write_word(0xE04200, 0x0100);
-        d.write_byte(0xE0411F, 0x56);
-        assert_eq!(d.fma_stream_fifo.len(), before);
-        d.write_word(0xE0411E, 0xABCD);
-        assert_eq!(d.fma_stream_fifo.len(), before + 2);
-        let mut buf = Vec::new();
-        opencdi::savestate::State::save(&d, &mut buf);
-        let mut e = Dvc::new();
-        opencdi::savestate::State::load(&mut e, &mut opencdi::savestate::Reader::new(&buf)).unwrap();
-        assert_eq!((e.impeg_pio, e.impeg_regs[0x11C], e.impeg_regs[0x11D]), (true, 0x3D, 0x14));
-        d.reset();
-        assert!(!d.impeg_pio && d.impeg_regs[..IMPEG_ATT].iter().all(|&b| b == 0) && d.impeg_regs[IMPEG_ATT..IMPEG_ATT + 4] == [0x3F; 4]);
-    }
-
-    fn dsp(d: &mut Dvc, index: u16, data: u16) {
-        d.write_word(0xE03022, index);
-        d.write_word(0xE03024, data);
-    }
-
-    #[test]
-    fn vmpeg_attenuation_powers_up_muted_and_follows_the_dsp_upload() {
-        let mut d = Dvc::new();
-        assert_eq!(d.audio_gains(), Some([0.0; 4]));
-        // Program words on other indexes are not attenuation.
-        for (i, v) in [(5, 0x0A), (6, 0xF0), (7, 0x80)] {
-            dsp(&mut d, i, v);
-        }
-        assert_eq!(d.audio_gains(), Some([0.0; 4]));
-        dsp(&mut d, 0, 0xF2);
-        dsp(&mut d, 1, 0x93);
-        for b in [0x00, 0x80, 0x80, 0x00] {
-            dsp(&mut d, 7, b);
-        }
-        assert_eq!(d.audio_gains(), None);
-        dsp(&mut d, 1, 0x93);
-        for b in [10, 0x80, 0x80, 0x00] {
-            dsp(&mut d, 7, b);
-        }
-        let g = d.audio_gains().unwrap();
-        assert!((g[0] - 0.316_227_77).abs() < 1e-4 && g[1] == 0.0 && g[2] == 1.0 && g[3] == 0.0);
-    }
-
-    #[test]
-    fn impeg_attenuation_powers_up_muted_and_follows_its_registers() {
-        let mut d = Dvc::new();
-        d.impeg = true;
-        d.reset();
-        assert_eq!(d.audio_gains(), Some([0.0; 4]));
-        d.write_word(0xE0420C, 0x003F);
-        d.write_word(0xE0420E, 0x3F00);
-        assert_eq!(d.audio_gains(), None);
-        d.write_word(0xE0420C, 0x0A3F);
-        let g = d.audio_gains().unwrap();
-        assert!((g[0] - 0.1).abs() < 1e-4 && g[1] == 0.0 && g[2] == 1.0 && g[3] == 0.0);
-    }
-}
-
-#[cfg(test)]
 mod timing_tests {
     use super::*;
 
@@ -2289,5 +2208,84 @@ mod timing_tests {
         feed(&mut d, &audio_packet(Some(5_000), &loud_frame()));
         feed(&mut d, &pack(6_000, 3528));
         assert_eq!(d.audio_out.len(), 2 * 1152);
+    }
+}
+
+#[cfg(test)]
+mod attenuation_tests {
+    use super::*;
+
+    fn dsp(d: &mut Dvc, index: u16, data: u16) {
+        d.write_word(0xE03022, index);
+        d.write_word(0xE03024, data);
+    }
+
+    #[test]
+    fn vmpeg_attenuation_powers_up_muted_and_follows_the_dsp_upload() {
+        let mut d = Dvc::new();
+        assert_eq!(d.audio_gains(), Some([0.0; 4]));
+        // Program words on other indexes are not attenuation.
+        for (i, v) in [(5, 0x0A), (6, 0xF0), (7, 0x80)] {
+            dsp(&mut d, i, v);
+        }
+        assert_eq!(d.audio_gains(), Some([0.0; 4]));
+        dsp(&mut d, 0, 0xF2);
+        dsp(&mut d, 1, 0x93);
+        for b in [0x00, 0x80, 0x80, 0x00] {
+            dsp(&mut d, 7, b);
+        }
+        assert_eq!(d.audio_gains(), None);
+        dsp(&mut d, 1, 0x93);
+        for b in [10, 0x80, 0x80, 0x00] {
+            dsp(&mut d, 7, b);
+        }
+        let g = d.audio_gains().unwrap();
+        assert!((g[0] - 0.316_227_77).abs() < 1e-4 && g[1] == 0.0 && g[2] == 1.0 && g[3] == 0.0);
+    }
+}
+
+#[cfg(test)]
+mod impeg_tests {
+    use super::*;
+
+    #[test]
+    fn impeg_audio_bits_and_pio() {
+        assert_eq!(Dvc::impeg_bits_from(0x0100 | 0x0008 | 0x0020 | 0x0001 | 0x0004), 0x0800 | 0x0100 | 0x0400 | 0x8000 | 0x0004);
+        assert_eq!(Dvc::impeg_bits_to(0x3D14), 0x0100 | 0x0020 | 0x0008 | 0x0010 | 0x0004);
+        let mut d = Dvc::new();
+        d.impeg = true;
+        d.write_word(0xE0421C, 0x3D14);
+        assert_eq!(d.read_word(0xE0421C), 0x3D14);
+        assert_eq!(d.get_fma_word(FMA_IER), Dvc::impeg_bits_to(0x3D14));
+        // Data-port words go to the stream only in PIO mode and only as complete words.
+        let before = d.fma_stream_fifo.len();
+        d.write_word(0xE0411E, 0x1234);
+        assert_eq!(d.fma_stream_fifo.len(), before);
+        d.write_word(0xE04200, 0x0100);
+        d.write_byte(0xE0411F, 0x56);
+        assert_eq!(d.fma_stream_fifo.len(), before);
+        d.write_word(0xE0411E, 0xABCD);
+        assert_eq!(d.fma_stream_fifo.len(), before + 2);
+        let mut buf = Vec::new();
+        opencdi::savestate::State::save(&d, &mut buf);
+        let mut e = Dvc::new();
+        opencdi::savestate::State::load(&mut e, &mut opencdi::savestate::Reader::new(&buf)).unwrap();
+        assert_eq!((e.impeg_pio, e.impeg_regs[0x11C], e.impeg_regs[0x11D]), (true, 0x3D, 0x14));
+        d.reset();
+        assert!(!d.impeg_pio && d.impeg_regs[..IMPEG_ATT].iter().all(|&b| b == 0) && d.impeg_regs[IMPEG_ATT..IMPEG_ATT + 4] == [0x3F; 4]);
+    }
+
+    #[test]
+    fn impeg_attenuation_powers_up_muted_and_follows_its_registers() {
+        let mut d = Dvc::new();
+        d.impeg = true;
+        d.reset();
+        assert_eq!(d.audio_gains(), Some([0.0; 4]));
+        d.write_word(0xE0420C, 0x003F);
+        d.write_word(0xE0420E, 0x3F00);
+        assert_eq!(d.audio_gains(), None);
+        d.write_word(0xE0420C, 0x0A3F);
+        let g = d.audio_gains().unwrap();
+        assert!((g[0] - 0.1).abs() < 1e-4 && g[1] == 0.0 && g[2] == 1.0 && g[3] == 0.0);
     }
 }

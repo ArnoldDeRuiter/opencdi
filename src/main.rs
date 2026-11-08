@@ -612,10 +612,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let available_bioses = find_all_available_bioses();
 
-    if let Some(b) = board {
-        m.bus.set_board(b);
-    }
-
     // 2. Load NVRAM if present
     let nvram_arg = flag_value("--nvram").map(PathBuf::from);
     let mono4_nvram = m.bus.mono4.is_some();

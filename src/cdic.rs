@@ -271,24 +271,19 @@ impl Cdic {
                     self.update_interrupt();
                     return;
                 }
-                let disc_adpcm = self.audio_channel != 0 && (val & AUDCTL_IRQ_ENABLE) == 0;
-                if (val & AUDCTL_START) != 0 && !disc_adpcm {
+                if (val & AUDCTL_START) != 0 && (val & AUDCTL_IRQ_ENABLE) != 0 {
                     if !self.audio_playing() {
                         self.decode_addr = AUDIO_MAP_BUFFER0;
                         self.audio_format_sectors = 0;
-                        let empty = self.ram[AUDIO_MAP_BUFFER0 as usize + 11] == 0xFF;
-                        if !empty && self.audio_map_counter == 0 {
+                        if self.audio_map_counter == 0 {
                             self.audio_map_counter = 1;
                         }
                         self.decoding_audio_map = true;
-                        // An empty map ends at once, even over a stopped buffer in flight (which keeps its remaining time); real maps start on the next tick.
-                        if empty {
-                            self.process_audio_map();
-                        }
                     }
                 } else {
-                    // The buffer in flight plays out; no further buffer is started.
+                    // Any other write stops the decoder at once; the buffer in flight keeps its remaining time, so the next map waits for it.
                     self.decode_addr = 0xFFFF;
+                    self.decoding_audio_map = false;
                 }
                 self.update_interrupt();
             }
@@ -447,11 +442,6 @@ pub fn get_sector_count_for_coding(coding: u8) -> u8 {
 impl Cdic {
     pub fn process_audio_map(&mut self) {
         if self.decode_addr == 0xFFFF {
-            // Playback was stopped; the buffer in flight has now finished.
-            if self.decoding_audio_map {
-                self.audio_buffer |= 0x8000;
-                self.update_interrupt();
-            }
             self.audio_map_counter = 0;
             self.audio_format_sectors = 0;
             self.decoding_audio_map = false;
@@ -497,10 +487,9 @@ impl Cdic {
             // Buffer has finished (coding == 0xFF)
             let was_decoding = self.decoding_audio_map;
             trace!("CDIC AUDIO MAP END: addr=0x{:04X}, coding=0xFF, was_decoding={}", addr, was_decoding);
+            // The decoder stays busy for one more tick and sets no finished flag.
             self.decode_addr = 0xFFFF;
             self.audio_format_sectors = 0;
-            self.decoding_audio_map = false;
-            self.z_buffer |= AUDCTL_FINISHED;
             if was_decoding {
                 self.audio_buffer |= 0x8000;
             }
@@ -991,31 +980,27 @@ mod tests {
         let mut c = Cdic::new();
         c.audio_channel = 0;
         put_map(&mut c, 0x2800, 0x01);
-        c.write_reg(0x3FA, 0x0800);
+        c.write_reg(0x3FA, 0x2800);
         tick(&mut c, 1);
         assert_ne!(c.audio_buffer & 0x8000, 0);
-        assert!(!c.irq_pending);
-        c.write_reg(0x3FA, 0x2800);
         assert!(c.irq_pending);
+        c.write_reg(0x3FA, 0x0800);
+        assert!(!c.irq_pending);
     }
 
     #[test]
-    fn audctl_write_zero_lets_the_buffer_in_flight_play_out() {
+    fn audctl_write_zero_stops_the_decoder_and_keeps_the_buffer_in_flight_queued() {
         let mut c = Cdic::new();
         put_map(&mut c, 0x2800, 0x01);
         c.write_reg(0x3FA, 0x2800);
         tick(&mut c, 1);
         let queued = c.audio.sfx.len();
         assert!(queued > 0);
-        c.audio_buffer = 0;
         c.write_reg(0x3FA, 0x0000);
-        assert!(c.decoding_audio_map);
+        assert!(!c.decoding_audio_map);
         assert_eq!(c.read_reg(0x3FA) & 0x0800, 0);
         assert_eq!(c.audio.sfx.len(), queued);
-        let left = c.audio_map_counter as u32;
-        tick(&mut c, left + 1);
-        assert!(!c.decoding_audio_map);
-        assert_ne!(c.audio_buffer & 0x8000, 0);
+        assert!(c.audio_map_counter > 0);
     }
 
     #[test]
@@ -1029,28 +1014,38 @@ mod tests {
     }
 
     #[test]
-    fn audctl_finished_flag_is_set_at_coding_ff_and_cleared_by_a_read() {
+    fn audctl_running_map_meeting_coding_ff_stays_busy_one_tick_without_a_finished_flag() {
         let mut c = Cdic::new();
-        put_map(&mut c, 0x2800, 0xFF);
+        put_map(&mut c, 0x2800, 0x01);
+        put_map(&mut c, 0x3200, 0xFF);
         c.write_reg(0x3FA, 0x2800);
+        tick(&mut c, 1);
+        let left = c.audio_map_counter as u32;
+        c.audio_buffer = 0;
+        tick(&mut c, left);
+        assert!(c.decoding_audio_map);
+        assert_ne!(c.audio_buffer & 0x8000, 0);
+        assert_eq!(c.read_reg(0x3FA) & 0x0001, 0);
+        c.audio_buffer = 0;
+        tick(&mut c, 1);
         assert!(!c.decoding_audio_map);
-        assert_eq!(c.read_reg(0x3FA) & 0x0801, 0x0001);
-        assert_eq!(c.z_buffer & 0x0001, 0);
+        assert_eq!(c.audio_buffer & 0x8000, 0);
     }
 
     #[test]
-    fn audctl_empty_map_start_over_a_stopped_buffer_in_flight_finishes_at_once() {
+    fn audctl_a_start_during_the_busy_tick_restarts_the_map() {
         let mut c = Cdic::new();
-        c.audio_channel = 0;
         put_map(&mut c, 0x2800, 0x01);
+        put_map(&mut c, 0x3200, 0xFF);
         c.write_reg(0x3FA, 0x2800);
         tick(&mut c, 1);
-        c.write_reg(0x3FA, 0x0000);
+        let left = c.audio_map_counter as u32;
+        tick(&mut c, left);
         assert!(c.decoding_audio_map);
-        put_map(&mut c, 0x2800, 0xFF);
-        c.write_reg(0x3FA, 0x0800);
-        assert!(!c.decoding_audio_map);
-        assert_eq!(c.read_reg(0x3FA) & 0x0801, 0x0001);
+        let frames = c.audio.sfx.frames_in;
+        c.write_reg(0x3FA, 0x2800);
+        tick(&mut c, 1);
+        assert!(c.audio.sfx.frames_in > frames);
     }
 
     #[test]

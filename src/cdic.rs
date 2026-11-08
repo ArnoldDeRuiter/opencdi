@@ -277,13 +277,12 @@ impl Cdic {
                         self.decode_addr = AUDIO_MAP_BUFFER0;
                         self.audio_format_sectors = 0;
                         let empty = self.ram[AUDIO_MAP_BUFFER0 as usize + 11] == 0xFF;
-                        if empty || self.audio_map_counter == 0 {
+                        if !empty && self.audio_map_counter == 0 {
                             self.audio_map_counter = 1;
                         }
                         self.decoding_audio_map = true;
-                        // An empty map ends at once, even over a stopped buffer in flight; real maps start on the next tick.
+                        // An empty map ends at once, even over a stopped buffer in flight (which keeps its remaining time); real maps start on the next tick.
                         if empty {
-                            self.audio_map_counter = 0;
                             self.process_audio_map();
                         }
                     }
@@ -1052,6 +1051,26 @@ mod tests {
         c.write_reg(0x3FA, 0x0800);
         assert!(!c.decoding_audio_map);
         assert_eq!(c.read_reg(0x3FA) & 0x0801, 0x0001);
+    }
+
+    #[test]
+    fn audctl_abort_over_a_buffer_in_flight_delays_the_next_map_until_it_has_played() {
+        let mut c = Cdic::new();
+        c.audio_channel = 0;
+        put_map(&mut c, 0x2800, 0x05);
+        c.write_reg(0x3FA, 0x2800);
+        tick(&mut c, 1);
+        let sectors = c.audio.sfx.frames_in;
+        c.write_reg(0x3FA, 0x0000);
+        put_map(&mut c, 0x2800, 0xFF);
+        c.write_reg(0x3FA, 0x0800);
+        c.write_reg(0x3FA, 0x0000);
+        put_map(&mut c, 0x2800, 0x05);
+        c.write_reg(0x3FA, 0x2800);
+        tick(&mut c, 3);
+        assert_eq!(c.audio.sfx.frames_in, sectors);
+        tick(&mut c, 8);
+        assert!(c.audio.sfx.frames_in > sectors);
     }
 
     #[test]

@@ -1,6 +1,6 @@
-static STUDIO_LEVELS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static STUDIO_LEVELS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
-/// Selects studio-level output (black 16, white 235 passed through) instead of the full-range stretch.
+/// Selects studio-level output (black 16, white 235 passed through, the default) instead of the full-range stretch.
 pub fn set_studio_levels(on: bool) {
     STUDIO_LEVELS.store(on, std::sync::atomic::Ordering::Relaxed);
 }

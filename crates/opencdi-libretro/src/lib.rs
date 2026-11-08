@@ -78,16 +78,16 @@ static OPTIONS: Table<[retro_core_option_definition; 4]> = Table([
     retro_core_option_definition {
         key: OPT_LEVELS.as_ptr(),
         desc: c"Video levels (restart)".as_ptr(),
-        info: c"full stretches the CD-i video levels (black 16, white 235) to 0-255, as PC displays expect. studio passes the levels through unchanged, so black shows as 16, for comparing against captures in limited range. Takes effect when content is loaded.".as_ptr(),
-        values: option_values(&[(c"full", c"full"), (c"studio", c"studio")]),
-        default_value: c"full".as_ptr(),
+        info: c"studio passes the CD-i video levels through unchanged (black 16, white 235), as the hardware outputs them. full stretches them to 0-255, as PC displays expect. Takes effect when content is loaded.".as_ptr(),
+        values: option_values(&[(c"studio", c"studio"), (c"full", c"full")]),
+        default_value: c"studio".as_ptr(),
     },
     retro_core_option_definition { key: std::ptr::null(), desc: std::ptr::null(), info: std::ptr::null(), values: [NO_VALUE; RETRO_NUM_CORE_OPTION_VALUES_MAX], default_value: std::ptr::null() },
 ]);
 static VARIABLES: Table<[retro_variable; 4]> = Table([
     retro_variable { key: OPT_DVC.as_ptr(), value: c"DVC cartridge (restart); auto|off".as_ptr() },
     retro_variable { key: OPT_MONO4.as_ptr(), value: c"CD-i 490 BIOS, experimental (restart); off|on".as_ptr() },
-    retro_variable { key: OPT_LEVELS.as_ptr(), value: c"Video levels (restart); full|studio".as_ptr() },
+    retro_variable { key: OPT_LEVELS.as_ptr(), value: c"Video levels (restart); studio|full".as_ptr() },
     retro_variable { key: std::ptr::null(), value: std::ptr::null() },
 ]);
 
@@ -668,7 +668,7 @@ pub extern "C" fn retro_cheat_set(_index: c_uint, _enabled: bool, _code: *const 
 fn load(game: *const retro_game_info) -> Result<(), String> {
     unload();
     let dir = system_directory().ok_or("frontend gave no system directory")?;
-    opencdi::mcd212::set_studio_levels(option_value(OPT_LEVELS).as_deref() == Some("studio"));
+    opencdi::mcd212::set_studio_levels(option_value(OPT_LEVELS).as_deref() != Some("full"));
     let allow_mono4 = option_value(OPT_MONO4).as_deref() == Some("on");
     let bios = find_bios(&dir, allow_mono4).inspect_err(|e| show_message(e))?;
     let mut temp = None;

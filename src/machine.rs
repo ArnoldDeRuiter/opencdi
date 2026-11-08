@@ -53,7 +53,9 @@ impl Machine {
     }
 
     pub fn load_dvc_rom<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<()> {
-        self.bus.load_dvc_rom(path)
+        self.bus.load_dvc_rom(path)?;
+        self.bus.dvc.impeg = self.bus.board == BoardKind::Mono4;
+        Ok(())
     }
 
     /// Reads a DVC cartridge ROM (`.rom` or a zip holding `vmpega.rom`) and checks it; nothing is fitted.
@@ -114,7 +116,7 @@ impl Machine {
         &self.bus.mcd212.framebuffer[..]
     }
 
-    /// Appends the frames made since the last call at OUT_RATE; returns how many.
+    /// Appends the frames mixed since the last call at `audio::OUT_RATE`; returns how many.
     pub fn drain_audio(&mut self, out: &mut Vec<(f32, f32)>) -> usize {
         self.bus.cdic.audio.drain(out)
     }
@@ -203,6 +205,7 @@ impl Machine {
             bus.render_scanline(line);
 
             bus.tick_board(cyc_per_line);
+            bus.tick_audio(cyc_per_line);
         }
         bus.counters.end_frame();
         // A double fault parks the CPU for good; say so once instead of idling silently.
@@ -293,7 +296,7 @@ impl Default for Machine {
     }
 }
 
-fn highest_ipl(bus: &mut CdiBus) -> u8 {
+pub fn highest_ipl(bus: &mut CdiBus) -> u8 {
     let int1_lvl = bus.scc_timer.int1_level();
     let timer_lvl = if bus.scc_timer.timer_irq { bus.scc_timer.picr1 & 7 } else { 0 };
     int1_lvl.max(timer_lvl).max(bus.board_ipl())

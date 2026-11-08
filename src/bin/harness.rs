@@ -44,7 +44,7 @@ fn dump_ppm(fb: &[u32], path: &str) {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: harness <bios.rom> <disc|none> <frames> [--dvc <rom>] [--ppm <out.ppm>] [--ntsc] [--autoplay [--print-autoplay-script]] [--input <script|@file>] [--sample <n> [--sample-audio]] [--dump-every <n> <prefix>] [--roundtrip <frame>] [--nvram-out <file>] [--counters] [--idle-pc <hex>] [--board mono1|mono4] [--video-levels full|studio] [--audio-out <file.s16>]");
+    eprintln!("usage: harness <bios.rom> <disc|none> <frames> [--dvc <rom>] [--video-levels full|studio] [--ppm <out.ppm>] [--ntsc] [--autoplay [--print-autoplay-script]] [--input <script|@file>] [--sample <n> [--sample-audio]] [--dump-every <n> <prefix>] [--roundtrip <frame>] [--counters] [--idle-pc <hex>] [--board mono1|mono4] [--audio-out <file.s16>] [--nvram-out <file>]");
     std::process::exit(2);
 }
 
@@ -65,24 +65,15 @@ fn main() {
     let mut sample_audio = false;
     let mut dump: Option<(u64, String)> = None;
     let mut roundtrip: Option<u64> = None;
-    let mut nvram_out: Option<&String> = None;
     let mut counters = false;
     let mut board: Option<BoardKind> = None;
     let mut idle_pc: Option<u32> = None;
     let mut audio_out: Option<(String, Vec<u8>)> = None;
+    let mut nvram_out: Option<&String> = None;
     let mut i = 4;
     while i < a.len() {
         match a[i].as_str() {
             "--dvc" => { i += 1; dvc = a.get(i); }
-            "--ppm" => { i += 1; ppm = a.get(i); }
-            "--nvram-out" => { i += 1; nvram_out = a.get(i); }
-            "--audio-out" => { i += 1; audio_out = Some((a.get(i).cloned().unwrap_or_else(|| usage()), Vec::new())); }
-            "--ntsc" => ntsc = true,
-            "--counters" => counters = true,
-            "--board" => {
-                i += 1;
-                board = Some(a.get(i).and_then(|s| BoardKind::parse(s)).unwrap_or_else(|| usage()));
-            }
             "--video-levels" => {
                 i += 1;
                 match a.get(i).map(|s| s.as_str()) {
@@ -90,6 +81,15 @@ fn main() {
                     Some("studio") => opencdi::mcd212::set_studio_levels(true),
                     _ => usage(),
                 }
+            }
+            "--ppm" => { i += 1; ppm = a.get(i); }
+            "--audio-out" => { i += 1; audio_out = Some((a.get(i).cloned().unwrap_or_else(|| usage()), Vec::new())); }
+            "--nvram-out" => { i += 1; nvram_out = Some(a.get(i).unwrap_or_else(|| usage())); }
+            "--ntsc" => ntsc = true,
+            "--counters" => counters = true,
+            "--board" => {
+                i += 1;
+                board = Some(a.get(i).and_then(|s| BoardKind::parse(s)).unwrap_or_else(|| usage()));
             }
             "--idle-pc" => { i += 1; idle_pc = Some(a.get(i).and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok()).unwrap_or_else(|| usage())); }
             "--autoplay" => autoplay = true,
@@ -261,10 +261,16 @@ fn main() {
         dump_ppm(m.framebuffer(), p);
     }
     if let Some((p, bytes)) = &audio_out {
-        std::fs::write(p, bytes).expect("write audio");
+        if let Err(e) = std::fs::write(p, bytes) {
+            eprintln!("cannot write audio {}: {}", p, e);
+            std::process::exit(1);
+        }
     }
     if let Some(p) = nvram_out {
-        std::fs::write(p, &m.bus.nvram.ram[..]).expect("write nvram");
+        if let Err(e) = std::fs::write(p, &m.bus.nvram.ram[..]) {
+            eprintln!("cannot write nvram {}: {}", p, e);
+            std::process::exit(1);
+        }
     }
     println!(
         "\nHARNESS frames={} pc={:08x} nonblack={} video_last={:016x} video_all={:016x} audio={:016x} audio_samples={} audio_nonzero={}",

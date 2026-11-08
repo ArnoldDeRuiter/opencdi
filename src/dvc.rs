@@ -261,7 +261,7 @@ pub struct AudioEvent {
     pub clock: Option<u64>,
 }
 
-const DUE_RING: usize = 32;
+pub const DUE_RING: usize = 32;
 // Decode times are 31 bits (a 33-bit timestamp in 22.5 kHz units) and wrap.
 const CLOCK_MASK: u64 = 0x7FFF_FFFF;
 
@@ -292,12 +292,14 @@ impl MpegSystemDemux {
         self.events.clear();
     }
 
-    fn save_due(&mut self, t: u64) {
+    fn save_due(&mut self, t: u64) -> bool {
         if self.due.len() < DUE_RING {
             self.due.push_back(t);
             self.last_due = Some(t);
+            true
         } else {
             log::warn!("DVC audio decode schedule full");
+            false
         }
     }
 
@@ -306,7 +308,9 @@ impl MpegSystemDemux {
         let (Some(last), true) = (self.last_due, self.interval != 0) else { return };
         let mut next = (last + self.interval) & CLOCK_MASK;
         while clock_before(next, until) {
-            self.save_due(next);
+            if !self.save_due(next) {
+                break;
+            }
             next = (next + self.interval) & CLOCK_MASK;
         }
     }
@@ -743,41 +747,50 @@ impl Dvc {
         (self.impeg_pio, self.impeg_hi_valid) = (false, false);
     }
 
-    pub fn reset_stream(&mut self) {
+    pub fn reset_video_stream(&mut self) {
         self.video_playing = false;
         self.video_armed = false;
         self.decoder_enabled = false;
+        self.fmv_playback_active = false;
+        self.fmv_decoder_active = false;
+        self.video_decoder = None;
+        self.frames_decoded_count = 0;
+        self.frames_presented_count = 0;
+        self.underflow_count = 0;
+        self.frame_accum = 0.0;
+        self.display_timecode = 0;
+        self.decoder_timecode = 0;
+        self.display_frame_counter = 0;
+        self.decoder_frame_counter = 0;
+        self.dvc_stream_fifo.clear();
+        self.demux.clear();
+        self.set_fmv_word(0x58, 0);
+        self.set_fmv_word(0x5A, 0);
+        self.set_fmv_word(0x08, 0);
+        self.set_fmv_word(0x0A, 0);
+        self.set_fmv_word(0x5C, 0x0000);
+    }
+
+    pub fn reset_stream(&mut self) {
+        self.reset_video_stream();
         self.audio_armed = false;
         self.audio_enabled = false;
         self.vcd_pixel_clock_13_5 = false;
-        self.fmv_playback_active = false;
-        self.fmv_decoder_active = false;
         self.dma_requested = false;
         self.total_cycles = 0;
         self.dclk = 0;
         self.dclk_accum = 0;
         self.timer_accum = 0;
         self.timer_counter = 0;
-        self.dvc_stream_fifo.clear();
         self.fma_stream_fifo.clear();
         self.transfer_for_fma = false;
         self.fma_dma_seen = false;
-        self.demux.clear();
         self.fma_demux.clear();
         self.mp2.reset();
         self.audio_out.clear();
         self.audio_stopped = true;
-        self.video_decoder = None;
-        self.frames_decoded_count = 0;
-        self.frames_presented_count = 0;
         self.vsync_counter = 0;
-        self.underflow_count = 0;
         self.reset_fma_schedule();
-        self.frame_accum = 0.0;
-        self.display_timecode = 0;
-        self.decoder_timecode = 0;
-        self.display_frame_counter = 0;
-        self.decoder_frame_counter = 0;
         // NOTE: Real DVC hardware keeps the last decoded picture in DRAM.
         // Screen blanking and plane transitions are managed by MCD-212.
     }
@@ -979,7 +992,7 @@ impl Dvc {
         self.set_fmv_word(0x5E, if fifo_ready { 0x2000 } else { 0 }); // SYS_STS bit 13
         self.set_fmv_word(0x98, ((self.dclk >> 6) & 0x7FFF) as u16);  // GEN_SYSCR (22.5kHz >> 5 = 45kHz >> 6)
         let queue_len: u16 = if self.video_decoder.is_some() {
-            if self.video_playing { 1 } else { 3 }
+            3
         } else {
             0
         };
@@ -1238,8 +1251,7 @@ impl Dvc {
         self.impeg_regs[IMPEG_ATT..IMPEG_ATT + 4].fill(0x3F);
     }
 
-    // Player-style gains (left-left, left-right, right-right, right-left) of the cartridge's own attenuator; None while it passes stereo straight through.
-    // Bytes in register order: left-left, left-right, right-left, right-right (inferred from the straight pair 0, mute, mute, 0 both drivers write at Play).
+    // Gains (LL, LR, RR, RL) of the cartridge's attenuator, bytes in register order LL, LR, RL, RR (inferred from the straight 0, mute, mute, 0 written at Play); None while straight through.
     pub fn audio_gains(&self) -> Option<[f32; 4]> {
         let g = if self.impeg {
             let r = &self.impeg_regs[IMPEG_ATT..IMPEG_ATT + 4];
@@ -1348,8 +1360,8 @@ impl Dvc {
                 }
                 self.or_fmv_word(FMV_ISR, FMV_IRQ_DCL);
                 if value & 0x0080 != 0 { // STOP
-                    self.has_valid_frame = false;
-                    self.framebuffer.fill(0xFF00_0000);
+                    // NOTE: Real DVC hardware keeps the last decoded picture in DRAM.
+                    // Retaining has_valid_frame prevents black flash during scene transitions.
                     self.video_armed = false;
                     self.video_playing = false;
                     self.decoder_enabled = false;
@@ -1371,19 +1383,14 @@ impl Dvc {
                     self.set_fmv_word(0x5C, 0x0000);
                 }
                 if value & 0x0100 != 0 { // RESET
-                    self.has_valid_frame = false;
-                    self.framebuffer.fill(0xFF00_0000);
-                    self.video_playing = false;
-                    self.video_armed = false;
-                    self.reset_stream();
+                    self.reset_video_stream();
                     self.set_fmv_word(FMV_ISR, 0);
                 }
                 if value & 0x1000 != 0 { // DEC_ON
                     self.decoder_enabled = true;
                 }
                 if value & 0x2000 != 0 { // DEC_OFF
-                    self.has_valid_frame = false;
-                    self.framebuffer.fill(0xFF00_0000);
+                    // NOTE: Real DVC hardware keeps the last decoded picture in DRAM.
                     self.decoder_enabled = false;
                     self.video_playing = false;
                     self.underflow_count = 0;
@@ -1800,12 +1807,9 @@ impl Dvc {
         for i in 0..6 {
             self.window[i] = self.get_fmv_word(FMV_SCRPOS_Y + i * 2);
         }
-        // Border components are studio-range levels (16 = black); expanded unless studio output is selected.
+        // Border components are studio-range levels (16 = black); mapped like the MCD212 output.
         let studio = crate::mcd212::studio_levels();
-        let level = |off: usize| {
-            let v = (self.get_fmv_word(off) & 0xFF) as i32;
-            if studio { v as u32 } else { (((v - 16) * 298 + 128) >> 8).clamp(0, 255) as u32 }
-        };
+        let level = |off: usize| crate::mcd212::level_out((self.get_fmv_word(off) & 0xFF) as i32, studio);
         self.border_color = 0xFF00_0000 | (level(FMV_BORDER_R) << 16) | (level(FMV_BORDER_R + 2) << 8) | level(FMV_BORDER_R + 4);
     }
 
@@ -1817,13 +1821,27 @@ impl Dvc {
             return;
         }
         out.fill(self.border_color);
-        let [pos_y, pos_x, win_h, win_w, off_y, off_x] = self.window.map(usize::from);
+        let [pos_y, pos_x, raw_win_h, raw_win_w, off_y, off_x] = self.window.map(usize::from);
         let (pic_w, pic_h) = (self.video_width, self.video_height);
         // The window is clipped to the decoded picture (mv_window adapts its size the same way).
         let off_x = off_x.min(pic_w);
         let off_y = off_y.min(pic_h);
-        let win_w = win_w.min(pic_w - off_x);
-        let win_h = win_h.min(pic_h - off_y);
+        let win_w = raw_win_w.min(pic_w.saturating_sub(off_x));
+        let win_h = raw_win_h.min(pic_h.saturating_sub(off_y));
+
+        // When WIN_W/WIN_H are unconstrained (0x7FFF sentinel) or when an origin position would
+        // push the video off-screen (such as Brain Dead 13's (384, 240) centering formula on -1 dimensions),
+        // fallback to standard centered full-screen placement.
+        let mut pos_x = pos_x;
+        let mut pos_y = pos_y;
+        if raw_win_w >= 0x7FFF || pos_x + win_w > 384 {
+            pos_x = (384usize.saturating_sub(pic_w)) / 2;
+        }
+        let total_active = if self.vsync_hz < 55.0 { 280 } else { 240 };
+        if raw_win_h >= 0x7FFF || pos_y + win_h > total_active {
+            pos_y = (total_active.saturating_sub(pic_h)) / 2;
+        }
+
         if active_line < pos_y || active_line >= pos_y + win_h {
             return;
         }

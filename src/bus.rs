@@ -13,8 +13,8 @@ use crate::mcd212::Mcd212;
 use crate::nvram::Timekeeper;
 use crate::scc_timer::SccTimer;
 use crate::slave::SlaveHle;
-use opencdi::mono4::{ciap, Mono4};
-use opencdi::tap::{self, Counters, Taps};
+use crate::mono4::{ciap, Mono4};
+use crate::tap::{self, Counters, Taps};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SharedIn4Owner {
@@ -44,7 +44,7 @@ impl BoardKind {
 pub struct CdiBus {
     pub board: BoardKind,
     pub mono4: Option<Box<Mono4>>, // Some exactly when `board` is Mono4
-    pub onchip_loud: opencdi::mono4::Loud, // unmodelled on-chip registers, reported once
+    pub onchip_loud: crate::mono4::Loud, // unmodelled on-chip registers, reported once
     pub mono4_bus_errors: bool, // Mono-IV: unmapped data accesses raise a bus error; debug switch CDI_MONO4_BUSERR=0 reads 0xFF instead
     pub rom: Box<[u8; 512 * 1024]>,
     pub sys_ram: Box<[u8; 512 * 1024]>,
@@ -84,7 +84,7 @@ impl CdiBus {
         Self {
             board: BoardKind::Mono1,
             mono4: None,
-            onchip_loud: opencdi::mono4::Loud::default(),
+            onchip_loud: crate::mono4::Loud::default(),
             mono4_bus_errors: std::env::var_os("CDI_MONO4_BUSERR").is_none_or(|v| v != "0"),
             rom: vec![0u8; 512 * 1024].into_boxed_slice().try_into().unwrap(),
             sys_ram: vec![0u8; 512 * 1024].into_boxed_slice().try_into().unwrap(),
@@ -143,8 +143,9 @@ impl CdiBus {
         self.sys_ram.fill(0);
         self.dvc.reset();
         let has_disc = self.cdrom.is_some();
+        let is_data = self.cdrom.as_ref().map_or(false, |c| c.tracks.iter().any(|t| (t.control & 0x40) != 0));
         self.slave.reset();
-        self.slave.set_disc_inserted(has_disc);
+        self.slave.set_disc_inserted(has_disc, is_data);
         self.scc_timer = SccTimer::new();
         self.dma = SccDma::new();
         self.scc_uart_cmd = 0;
@@ -191,6 +192,24 @@ impl CdiBus {
             let wait = self.mcd212.rom_dtack_cycles();
             self.wait_cycles += wait;
             self.current_line_cycle = self.current_line_cycle.wrapping_add(wait);
+        }
+    }
+
+    #[inline(always)]
+    pub fn add_sys_ram_wait(&mut self) {
+        if self.emulate_wait_states {
+            let wait = self.mcd212.ram_dtack_cycles::<0>(self.current_line_cycle);
+            self.wait_cycles += wait;
+            self.current_line_cycle = self.current_line_cycle.wrapping_add(wait);
+        }
+    }
+
+    #[inline(always)]
+    pub fn add_dvc_wait(&mut self) {
+        if self.emulate_wait_states {
+            // Expansion bus DRAM / ROM access: 2 wait cycles (4 clock cycles)
+            self.wait_cycles += 2;
+            self.current_line_cycle = self.current_line_cycle.wrapping_add(2);
         }
     }
 
@@ -263,8 +282,9 @@ impl CdiBus {
 
     pub fn load_cdrom<P: AsRef<Path>>(&mut self, path: P) -> Result<(), Box<dyn std::error::Error>> {
         let cd = CdRom::open(path)?;
+        let is_data = cd.tracks.iter().any(|t| (t.control & 0x40) != 0);
         self.cdrom = Some(cd);
-        self.slave.set_disc_inserted(true);
+        self.slave.set_disc_inserted(true, is_data);
         if let Some(m) = self.mono4.as_deref_mut() {
             m.ikat.set_disc_present(true);
         }
@@ -273,11 +293,12 @@ impl CdiBus {
 
     pub fn change_disc<P: AsRef<Path>>(&mut self, path: P) -> Result<(), Box<dyn std::error::Error>> {
         let cd = CdRom::open(path)?;
+        let is_data = cd.tracks.iter().any(|t| (t.control & 0x40) != 0);
         self.cdrom = Some(cd);
         self.cdic.curr_lba = 0;
         self.cdic.command = 0;
         self.cdic.disc_command = 0;
-        self.slave.notify_disc_swapped();
+        self.slave.notify_disc_swapped(is_data);
         if let Some(m) = self.mono4.as_deref_mut() {
             m.ikat.set_disc_present(true);
             (m.ciap.drive_active, m.ciap.byteswap) = (false, false);
@@ -336,6 +357,19 @@ impl CdiBus {
         }
     }
 
+    // Mixes the output frames due for `cycles` of board time; called after the line's peripherals ticked.
+    pub fn tick_audio(&mut self, cycles: u32) {
+        if std::mem::take(&mut self.dvc.audio_stopped) {
+            self.cdic.audio.stop_mpeg();
+        }
+        let dvc_gains = if self.dvc.is_fitted() { self.dvc.audio_gains() } else { None };
+        let gains = match self.board {
+            BoardKind::Mono1 => self.cdic.audio.slave_gains(),
+            BoardKind::Mono4 => self.mono4.as_deref().and_then(|m| m.ciap.attenuation()),
+        };
+        self.cdic.audio.advance(cycles, self.mcd212.video_mode.cycles_per_sector(), gains, dvc_gains);
+    }
+
     pub fn tick_slave(&mut self, cycles: u32) {
         self.slave.tick(cycles);
     }
@@ -359,15 +393,6 @@ impl CdiBus {
                 self.tick_dvc(cycles);
             }
         }
-        if std::mem::take(&mut self.dvc.audio_stopped) {
-            self.cdic.audio.stop_mpeg();
-        }
-        let gains = match self.board {
-            BoardKind::Mono1 => self.cdic.audio.slave_gains(),
-            BoardKind::Mono4 => self.mono4.as_deref().and_then(|m| m.ciap.attenuation()),
-        };
-        let dvc_gains = if self.dvc.is_fitted() { self.dvc.audio_gains() } else { None };
-        self.cdic.audio.advance(cycles, self.mcd212.video_mode.cycles_per_sector(), gains, dvc_gains);
     }
 
     /// Highest external interrupt level the board peripherals request (0 for none).
@@ -692,10 +717,14 @@ impl CdiBus {
             }
 
             // System RAM (512 KB)
-            0x500000..=0x57FFFF => self.sys_ram[(addr - 0x500000) as usize],
+            0x500000..=0x57FFFF => {
+                self.add_sys_ram_wait();
+                self.sys_ram[(addr - 0x500000) as usize]
+            }
 
             // DVC RAM Block 1 (1 MB)
             0xD00000..=0xDFFFFF => {
+                self.add_dvc_wait();
                 if self.dvc.is_fitted() {
                     self.dvc.read_ram1((addr - 0xD00000) as usize)
                 } else {
@@ -705,6 +734,7 @@ impl CdiBus {
 
             // DVC Registers Window (0xE00000..0xE3FFFF)
             0xE00000..=0xE3FFFF => {
+                self.add_dvc_wait();
                 if self.dvc.is_fitted() {
                     self.dvc.read_byte(addr)
                 } else {
@@ -714,6 +744,7 @@ impl CdiBus {
 
             // DVC ROM (vmpega.rom, 256 KB)
             0xE40000..=0xE7FFFF => {
+                self.add_dvc_wait();
                 if self.dvc.is_fitted() {
                     self.dvc.read_rom((addr - 0xE40000) as usize)
                 } else {
@@ -723,6 +754,7 @@ impl CdiBus {
 
             // DVC Picture DRAM (512 KB, gated)
             0xE80000..=0xEFFFFF => {
+                self.add_dvc_wait();
                 if self.dvc.is_fitted() && self.dvc.ram2_enabled {
                     self.dvc.read_ram2((addr - 0xE80000) as usize)
                 } else {
@@ -789,6 +821,7 @@ impl CdiBus {
     fn mono1_rd16(&mut self, address: u32, addr: u32) -> u16 {
         match addr {
             0x500000..=0x57FFFE => {
+                self.add_sys_ram_wait();
                 let idx = (addr - 0x500000) as usize;
                 ((self.sys_ram[idx] as u16) << 8) | (self.sys_ram[idx + 1] as u16)
             }
@@ -808,6 +841,7 @@ impl CdiBus {
                 self.slave.read(addr - 0x310000)
             }
             0xD00000..=0xDFFFFE => {
+                self.add_dvc_wait();
                 if self.dvc.is_fitted() {
                     let idx = (addr - 0xD00000) as usize;
                     ((self.dvc.read_ram1(idx) as u16) << 8) | (self.dvc.read_ram1(idx + 1) as u16)
@@ -816,6 +850,7 @@ impl CdiBus {
                 }
             }
             0xE00000..=0xE3FFFE => {
+                self.add_dvc_wait();
                 if self.dvc.is_fitted() {
                     let word_offset = (addr - 0xE00000) >> 1;
                     let val = self.dvc.read_reg(word_offset);
@@ -828,6 +863,7 @@ impl CdiBus {
                 }
             }
             0xE40000..=0xE7FFFE => {
+                self.add_dvc_wait();
                 if self.dvc.is_fitted() {
                     let idx = (addr - 0xE40000) as usize;
                     ((self.dvc.read_rom(idx) as u16) << 8) | (self.dvc.read_rom(idx + 1) as u16)
@@ -836,6 +872,7 @@ impl CdiBus {
                 }
             }
             0xE80000..=0xEFFFFE => {
+                self.add_dvc_wait();
                 if self.dvc.is_fitted() && self.dvc.ram2_enabled {
                     let idx = (addr - 0xE80000) as usize;
                     ((self.dvc.read_ram2(idx) as u16) << 8) | (self.dvc.read_ram2(idx + 1) as u16)
@@ -991,10 +1028,14 @@ impl CdiBus {
             }
 
             // System RAM (512 KB)
-            0x500000..=0x57FFFF => self.sys_ram[(addr - 0x500000) as usize] = value,
+            0x500000..=0x57FFFF => {
+                self.add_sys_ram_wait();
+                self.sys_ram[(addr - 0x500000) as usize] = value;
+            }
 
             // DVC RAM Block 1 (1 MB)
             0xD00000..=0xDFFFFF => {
+                self.add_dvc_wait();
                 if self.dvc.is_fitted() {
                     self.dvc.write_ram1((addr - 0xD00000) as usize, value);
                 }
@@ -1002,6 +1043,7 @@ impl CdiBus {
 
             // DVC Registers (0xE00000..0xE3FFFF)
             0xE00000..=0xE3FFFF => {
+                self.add_dvc_wait();
                 if self.dvc.is_fitted() {
                     self.dvc.write_byte(addr, value);
                     if self.dvc_dma_requested() {
@@ -1012,6 +1054,7 @@ impl CdiBus {
 
             // DVC Picture DRAM (512 KB, gated)
             0xE80000..=0xEFFFFF => {
+                self.add_dvc_wait();
                 if self.dvc.is_fitted() {
                     self.dvc.write_ram2((addr - 0xE80000) as usize, value);
                 }
@@ -1052,6 +1095,7 @@ impl CdiBus {
         if ((addr <= self.watch_addr1 && self.watch_addr1 < addr + 2) || (addr <= self.watch_addr2 && self.watch_addr2 < addr + 2)) && self.watch_enabled {
             println!("[WATCH WRITE WORD F{}] addr=0x{:08X}, val=0x{:04X} at PC=0x{:08X} line={} cyc={}", self.current_frame, addr, value, self.current_pc, self.mcd212.scanline, self.current_line_cycle);
         }
+
         match addr {
             0x000000..=0x07FFFE => {
                 self.add_ram_wait::<0>();
@@ -1083,6 +1127,7 @@ impl CdiBus {
     fn mono1_wr16(&mut self, address: u32, addr: u32, value: u16) {
         match addr {
             0x500000..=0x57FFFE => {
+                self.add_sys_ram_wait();
                 let idx = (addr - 0x500000) as usize;
                 self.sys_ram[idx] = (value >> 8) as u8;
                 self.sys_ram[idx + 1] = value as u8;
@@ -1111,6 +1156,7 @@ impl CdiBus {
                 return;
             }
             0xD00000..=0xDFFFFE => {
+                self.add_dvc_wait();
                 if self.dvc.is_fitted() {
                     let idx = (addr - 0xD00000) as usize;
                     self.dvc.write_ram1(idx, (value >> 8) as u8);
@@ -1119,6 +1165,7 @@ impl CdiBus {
                 return;
             }
             0xE00000..=0xE3FFFE => {
+                self.add_dvc_wait();
                 if self.dvc.is_fitted() {
                     let word_offset = (addr - 0xE00000) >> 1;
                     if self.trace_fmv {
@@ -1133,6 +1180,7 @@ impl CdiBus {
                 return;
             }
             0xE80000..=0xEFFFFE => {
+                self.add_dvc_wait();
                 if self.dvc.is_fitted() {
                     let idx = (addr - 0xE80000) as usize;
                     self.dvc.write_ram2(idx, (value >> 8) as u8);
@@ -1232,7 +1280,7 @@ impl CdiBus {
             }
             0x310000..=0x31FFFF if (addr & 1) == 1 => return m.ikat.read(addr - 0x310000, pc),
             0x320000..=0x32FFFF => {
-                if let Some(i) = opencdi::mono4::nvram::Nvram32::index(addr - 0x320000) {
+                if let Some(i) = crate::mono4::nvram::Nvram32::index(addr - 0x320000) {
                     return m.nvram.read(i);
                 }
             }
@@ -1298,7 +1346,7 @@ impl CdiBus {
                 return;
             }
             0x320000..=0x32FFFF => {
-                if let Some(i) = opencdi::mono4::nvram::Nvram32::index(addr - 0x320000) {
+                if let Some(i) = crate::mono4::nvram::Nvram32::index(addr - 0x320000) {
                     m.nvram.write(i, value);
                     return;
                 }
@@ -1340,7 +1388,7 @@ impl CdiBus {
         let m = self.mono4.as_deref()?;
         match addr {
             0x300000..=0x303FFF if !ciap::Ciap::is_reg(addr - 0x300000) => Some(m.ciap.ram[(addr - 0x300000) as usize]),
-            0x320000..=0x32FFFF => opencdi::mono4::nvram::Nvram32::index(addr - 0x320000).map(|i| m.nvram.peek(i)),
+            0x320000..=0x32FFFF => crate::mono4::nvram::Nvram32::index(addr - 0x320000).map(|i| m.nvram.peek(i)),
             _ => None,
         }
     }

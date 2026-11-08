@@ -1,10 +1,10 @@
-// Savestates: a byte buffer mirroring the machine's internal state (no files, no threads); see doc/handover/savestates.md.
+// Savestates: a byte buffer mirroring the machine's internal state (no files, no threads).
 use std::collections::VecDeque;
 use std::fmt;
 
 pub const MAGIC: [u8; 8] = *b"OPENCDI\x1a";
 // Bump whenever a saved field is added, removed, reordered or changes type.
-pub const VERSION: u32 = 27;
+pub const VERSION: u32 = 28;
 pub const HEADER_LEN: usize = 64;
 const CPU_BLOB_MAX: u64 = 1 << 20;
 
@@ -273,11 +273,11 @@ macro_rules! impl_state {
     ($ty:ty { $($f:ident),* $(,)? } skip { $($s:ident),* $(,)? }) => {
         impl $crate::savestate::State for $ty {
             fn save(&self, w: &mut Vec<u8>) {
-                let Self { $($f,)* $($s: _,)* } = self;
+                let Self { $($f,)* $($s: _,)* .. } = self;
                 $( $crate::savestate::State::save($f, w); )*
             }
             fn load(&mut self, r: &mut $crate::savestate::Reader) -> Result<(), $crate::savestate::StateError> {
-                let Self { $($f,)* $($s: _,)* } = self;
+                let Self { $($f,)* $($s: _,)* .. } = self;
                 $( $crate::savestate::State::load($f, r)?; )*
                 Ok(())
             }

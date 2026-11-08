@@ -83,20 +83,27 @@ fn attach_console() {
 const USAGE: &str = "\
 Usage: opencdi [options] [disc image (cue, chd, iso, bin)]
 
-  --rom <path>        System BIOS (default: search bios/, the current and the program directory)
-  --frames <n>        Quit after n emulated frames
-  --mouse             Start in mouse mode (host mouse drives the CD-i pointer)
-  --recent [n]        List the recent disc images, or boot recent image number n
-  --no-host-input     Ignore host keyboard, mouse and gamepads; never grab the cursor
-  --bios, --standalone  Boot the BIOS shell without a disc
-  --board mono1|mono4 Console board (default mono1; mono4 is the CD-i 490, give --rom its BIOS)
-  --dvc <path>        Digital Video Cartridge ROM (default: search dvc/, bios/, the current and the program directory)
-  --no-dvc, --nodvc   Boot without the Digital Video Cartridge
-  --slave-debug       Log slave (mouse channel) bytes
-  --nvram <path>      Console NVRAM save file (default: bios/nvram_mk48t08.bin or nvram_mk48t08.bin; 490: nvram_cdi490a.bin)
-  --run-in-menu       Windows: keep emulating while a menu or dialog is open, or the window is moved (default: paused)
-  --console           Windows: show the log in the parent console or a new console window
-  --help, -h          Show this text
+  --rom <path>             System BIOS (default: search bios/, the current and the program directory)
+  --frames <n>             Quit after n emulated frames
+  --no-autoplay            Leave the BIOS shell waiting instead of clicking PLAY CD-I for the user
+  --mouse                  Start in mouse mode (host mouse drives the CD-i pointer; click in the window to capture it)
+  --mouse-speed <f>        Scale captured mouse motion (default 0.5)
+  --mouse-sensitivity <v>  Mouse sensitivity multiplier (e.g. 0.5, default: 0.5)
+  --recent [n]             List the recent disc images, or boot recent image number n
+  --no-host-input          Ignore host keyboard, mouse and gamepads; never grab the cursor
+  --bios, --standalone     Boot the BIOS shell without a disc
+  --board mono1|mono4      Console board (default mono1; mono4 is the CD-i 490, give --rom its BIOS)
+  --dvc <path>             Digital Video Cartridge ROM (default: search dvc/, bios/, the current and the program directory)
+  --no-dvc, --nodvc        Boot without the Digital Video Cartridge
+  --slave-debug            Log slave (mouse channel) bytes
+  --nvram <path>           Console NVRAM save file (default: bios/nvram_mk48t08.bin or nvram_mk48t08.bin; 490: nvram_cdi490a.bin)
+  --fullscreen, -f         Start directly in borderless fullscreen
+  --no-menu, --nomenu      Start without the top menu bar (useful for frontends)
+  --monitor <n>            Monitor index to display on in fullscreen
+  --screenshot-dir <path>  Folder for F8/F12 PNG screenshots (default: screenshots/ next to the program)
+  --run-in-menu            Windows: keep emulating while a menu or dialog is open, or the window is moved (default: paused)
+  --console                Windows: show the log in the parent console or a new console window
+  --help, -h               Show this text
 ";
 
 
@@ -204,6 +211,154 @@ fn find_bios_rom() -> Option<PathBuf> {
     bios::best(found).filter(|(_, img)| img.report.status != bios::Status::Error).map(|(p, _)| p)
 }
 
+fn find_all_available_bioses() -> Vec<(PathBuf, String)> {
+    let mut seen = HashSet::new();
+    let mut bioses = Vec::new();
+
+    let mut dirs_to_scan = vec![
+        PathBuf::from("bios"),
+        PathBuf::from("."),
+        PathBuf::from("file utili/bios"),
+        PathBuf::from("../file utili/bios"),
+    ];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            dirs_to_scan.push(parent.join("bios"));
+            dirs_to_scan.push(parent.to_path_buf());
+            dirs_to_scan.push(parent.join("file utili").join("bios"));
+            dirs_to_scan.push(parent.join("..").join("file utili").join("bios"));
+        }
+    }
+
+    for dir in dirs_to_scan {
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let p = entry.path();
+                if !p.is_file() {
+                    continue;
+                }
+                let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+                if ext != "rom" && ext != "bin" && ext != "zip" {
+                    continue;
+                }
+                let canon = p.canonicalize().unwrap_or_else(|_| p.clone());
+                if !seen.insert(canon) {
+                    continue;
+                }
+                match Machine::read_bios(&p) {
+                    Ok((entry, img)) if img.report.status != bios::Status::Error => {
+                        let file_str = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                        let label = if let Some(k) = img.report.known {
+                            if let Some(e) = entry {
+                                format!("{} [{} / {}]", k.model, file_str, e)
+                            } else {
+                                format!("{} ({})", k.model, file_str)
+                            }
+                        } else {
+                            format!("Custom CD-i ROM ({})", file_str)
+                        };
+                        bioses.push((p, label));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    bioses
+}
+
+fn resolve_or_guide_bios(rom_arg: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(p) = rom_arg {
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Some(saved) = opencdi::frontend::load_saved_bios() {
+        if Machine::read_bios(&saved).is_ok() {
+            info!("Loaded saved system BIOS from configuration (opencdi.ini): {:?}", saved);
+            return Some(saved);
+        }
+    }
+    if let Some(found) = find_bios_rom() {
+        return Some(found);
+    }
+
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use std::os::windows::ffi::OsStrExt;
+        let prompt_text =
+            "OpenCDi - Philips CD-i System BIOS Missing\n            ==========================================\n\n            Nessun file BIOS di sistema Philips CD-i è stato trovato nelle cartelle di ricerca.\n            OpenCDi richiede una ROM BIOS autentica (es. cdi220b.rom, cdi490a.rom, cdimono1.zip).\n\n            Cosa desideri fare?\n\n            • [SÌ] SFOGLIA: Seleziona manualmente il file del BIOS (o archivio .zip) dal tuo PC\n            • [NO] GUIDAMI ALLA CARTELLA: Crea e apri la cartella 'bios/' in Esplora Risorse dove puoi copiare i file ROM\n            • [ANNULLA] Esci da OpenCDi";
+
+        let wide_text: Vec<u16> = std::ffi::OsStr::new(prompt_text).encode_wide().chain(std::iter::once(0)).collect();
+        let wide_title: Vec<u16> = std::ffi::OsStr::new("OpenCDi - Required BIOS Missing").encode_wide().chain(std::iter::once(0)).collect();
+
+        loop {
+            let res = MessageBoxW(
+                std::ptr::null_mut(),
+                wide_text.as_ptr(),
+                wide_title.as_ptr(),
+                0x0000_0003 | 0x0000_0020, // MB_YESNOCANCEL | MB_ICONQUESTION
+            );
+
+            if res == 6 { // IDYES
+                if let Some(picked) = gui::open_bios_dialog(std::ptr::null_mut()) {
+                    match Machine::read_bios(&picked) {
+                        Ok((_, img)) if img.report.status != bios::Status::Error => {
+                            opencdi::frontend::save_bios_preference(&picked);
+                            return Some(picked);
+                        }
+                        Ok((_, img)) => {
+                            let err_msg = format!("Il file selezionato è stato rifiutato come BIOS CD-i:\n\n{}", img.report.message);
+                            let wide_err: Vec<u16> = std::ffi::OsStr::new(&err_msg).encode_wide().chain(std::iter::once(0)).collect();
+                            MessageBoxW(std::ptr::null_mut(), wide_err.as_ptr(), wide_title.as_ptr(), 0x0000_0000 | 0x0000_0010); // MB_OK | MB_ICONERROR
+                        }
+                        Err(e) => {
+                            let err_msg = format!("Impossibile aprire il file selezionato:\n\n{}", e);
+                            let wide_err: Vec<u16> = std::ffi::OsStr::new(&err_msg).encode_wide().chain(std::iter::once(0)).collect();
+                            MessageBoxW(std::ptr::null_mut(), wide_err.as_ptr(), wide_title.as_ptr(), 0x0000_0000 | 0x0000_0010);
+                        }
+                    }
+                }
+            } else if res == 7 { // IDNO
+                let bios_dir = Path::new("bios");
+                let _ = std::fs::create_dir_all(bios_dir);
+                gui::open_folder(bios_dir);
+
+                let guide_text =
+                    "La cartella 'bios/' è stata aperta in Esplora Risorse!\n\n                    Copia nella cartella uno o più dei seguenti file:\n                      • cdi220b.rom (512 KB, Philips CD-i 220 European PAL - consigliato)\n                      • cdi490a.rom (512 KB, Philips CD-i 490 Mono-IV)\n                      • vmpega.rom (256 KB, Digital Video Cartridge per FMV/MPEG)\n                      • oppure archivi cdimono1.zip / cdibios.zip\n\n                    Dopo aver copiato i file, clicca [OK] per verificare e avviare OpenCDi.";
+
+                let wide_guide: Vec<u16> = std::ffi::OsStr::new(guide_text).encode_wide().chain(std::iter::once(0)).collect();
+                let guide_res = MessageBoxW(
+                    std::ptr::null_mut(),
+                    wide_guide.as_ptr(),
+                    wide_title.as_ptr(),
+                    0x0000_0001 | 0x0000_0040, // MB_OKCANCEL | MB_ICONINFORMATION
+                );
+
+                if guide_res == 1 { // IDOK
+                    if let Some(found) = find_bios_rom() {
+                        opencdi::frontend::save_bios_preference(&found);
+                        return Some(found);
+                    } else {
+                        let not_found = "Nessun BIOS valido trovato nella cartella 'bios/'.\nAssicurati di aver incollato il file (es. cdi220b.rom) e riprova.";
+                        let wide_nf: Vec<u16> = std::ffi::OsStr::new(not_found).encode_wide().chain(std::iter::once(0)).collect();
+                        MessageBoxW(std::ptr::null_mut(), wide_nf.as_ptr(), wide_title.as_ptr(), 0x0000_0000 | 0x0000_0030); // MB_OK | MB_ICONWARNING
+                    }
+                }
+            } else {
+                // IDCANCEL
+                return None;
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    None
+}
+
 // First candidate that passes the cartridge check; refused files are logged with the reason.
 fn find_dvc_rom() -> Option<PathBuf> {
     const DVC_CANDIDATES: &[&str] = &[
@@ -225,6 +380,28 @@ fn find_dvc_rom() -> Option<PathBuf> {
     None
 }
 
+// Fits a cartridge ROM and logs the check verdict: refused images say so, unknown ones warn.
+fn load_dvc_logged(m: &mut Machine, path: &std::path::Path) -> bool {
+    match m.load_dvc(path) {
+        Ok(r) if r.status == bios::Status::Warning => {
+            warn!("DVC ROM {:?}: {}", path, r.message);
+            true
+        }
+        Ok(r) => {
+            info!("DVC ROM {:?} [{}]: {}", path, r.status, r.message);
+            true
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            warn!("DVC ROM {:?} refused: {}", path, e);
+            false
+        }
+        Err(e) => {
+            warn!("DVC ROM {:?}: {}", path, e);
+            false
+        }
+    }
+}
+
 fn find_nvram_file() -> Option<PathBuf> {
     const NVRAM_CANDIDATES: &[&str] = &[
         "bios/nvram_mk48t08.bin",
@@ -240,49 +417,25 @@ fn find_nvram_file() -> Option<PathBuf> {
     None
 }
 
-fn save_screenshot(frame_count: u64, framebuffer: &[u32]) {
-    let _ = std::fs::create_dir_all("screenshots_hotel_mario");
-    let filename = format!("screenshots_hotel_mario/screenshot_frame_{}.bmp", frame_count);
-    let width = SCREEN_WIDTH as i32;
-    let height = SCREEN_HEIGHT as i32;
-    let file_size = 54 + (width * height * 4) as u32;
-    let mut bmp = Vec::with_capacity(file_size as usize);
-    bmp.extend_from_slice(b"BM");
-    bmp.extend_from_slice(&file_size.to_le_bytes());
-    bmp.extend_from_slice(&[0, 0, 0, 0]);
-    bmp.extend_from_slice(&54u32.to_le_bytes());
-    bmp.extend_from_slice(&40u32.to_le_bytes());
-    bmp.extend_from_slice(&width.to_le_bytes());
-    bmp.extend_from_slice(&(-height).to_le_bytes());
-    bmp.extend_from_slice(&1u16.to_le_bytes());
-    bmp.extend_from_slice(&32u16.to_le_bytes());
-    bmp.extend_from_slice(&0u32.to_le_bytes());
-    bmp.extend_from_slice(&((width * height * 4) as u32).to_le_bytes());
-    bmp.extend_from_slice(&2835u32.to_le_bytes());
-    bmp.extend_from_slice(&2835u32.to_le_bytes());
-    bmp.extend_from_slice(&0u32.to_le_bytes());
-    bmp.extend_from_slice(&0u32.to_le_bytes());
-    for &pixel in framebuffer {
-        bmp.push((pixel & 0xFF) as u8);
-        bmp.push(((pixel >> 8) & 0xFF) as u8);
-        bmp.push(((pixel >> 16) & 0xFF) as u8);
-        bmp.push(0xFF);
+// ASCII letters, digits, '-' and '_' only: spaces become '_', brackets are dropped
+fn file_stem(game: &str) -> String {
+    let mut name = String::new();
+    for c in game.chars().filter(|c| !"()[]{}".contains(*c)) {
+        let c = if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' };
+        if c != '_' || !name.ends_with('_') {
+            name.push(c);
+        }
     }
-    if let Ok(_) = std::fs::write(&filename, &bmp) {
-        info!("Screenshot salvato in {}", filename);
-    }
+    let name = name.trim_matches('_');
+    if name.is_empty() { "opencdi".to_string() } else { name.to_string() }
 }
 
-// Savestates go into local/states when run from the repo, else states/ next to the binary
+// Savestates go into states/ next to the binary
 fn states_dir() -> PathBuf {
-    if Path::new("local").is_dir() {
-        PathBuf::from("local").join("states")
-    } else {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("states")))
-            .unwrap_or_else(|| PathBuf::from("states"))
-    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("states")))
+        .unwrap_or_else(|| PathBuf::from("states"))
 }
 
 // RetroArch naming: slot 0 is <name>.state, slot N is <name>.stateN
@@ -299,7 +452,7 @@ fn write_state_file(path: &Path, m: &Machine, frontend: &[u8]) -> std::io::Resul
     }
     let mut buf = Vec::new();
     m.save_state(frontend, &mut buf);
-    let tmp = path.with_extension("tmp");
+    let tmp = std::path::PathBuf::from(format!("{}.tmp", path.display()));
     std::fs::write(&tmp, &buf)?;
     std::fs::rename(&tmp, path)?;
     Ok(buf.len())
@@ -311,31 +464,59 @@ fn read_state_file(path: &Path, m: &mut Machine) -> Result<Vec<u8>, String> {
     m.load_state(&data).map(|fe| fe.to_vec()).map_err(|e: StateError| e.to_string())
 }
 
-// F8: binary PPM (no image crate needed) into local/screenshots when run from the repo, else screenshots/ next to the binary
-fn save_screenshot_ppm(frame_count: u64, framebuffer: &[u32]) {
-    let dir = if Path::new("local").is_dir() {
-        PathBuf::from("local").join("screenshots")
-    } else {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("screenshots")))
-            .unwrap_or_else(|| PathBuf::from("screenshots"))
-    };
-    if let Err(e) = std::fs::create_dir_all(&dir) {
+// <game>_<frame>.png in dir, created on demand
+fn save_screenshot(dir: &Path, game: &str, frame_count: u64, framebuffer: &[u32]) {
+    if let Err(e) = std::fs::create_dir_all(dir) {
         error!("Cannot create screenshot directory {:?}: {}", dir, e);
         return;
     }
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let path = dir.join(format!("opencdi_{}_frame{}.ppm", stamp, frame_count));
-    let mut ppm = format!("P6\n{} {}\n255\n", SCREEN_WIDTH, SCREEN_HEIGHT).into_bytes();
-    ppm.reserve(SCREEN_WIDTH * SCREEN_HEIGHT * 3);
+    let path = dir.join(format!("{}_{}.png", file_stem(game), frame_count));
+    let mut rgb = Vec::with_capacity(SCREEN_WIDTH * SCREEN_HEIGHT * 3);
     for &pixel in &framebuffer[..SCREEN_WIDTH * SCREEN_HEIGHT] {
-        ppm.extend_from_slice(&[(pixel >> 16) as u8, (pixel >> 8) as u8, pixel as u8]);
+        rgb.extend_from_slice(&[(pixel >> 16) as u8, (pixel >> 8) as u8, pixel as u8]);
     }
-    match std::fs::write(&path, &ppm) {
-        Ok(_) => info!("Screenshot saved to {:?}", path),
+    let write = || -> Result<(), Box<dyn std::error::Error>> {
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(&path)?), SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header()?.write_image_data(&rgb)?;
+        Ok(())
+    };
+    match write() {
+        Ok(()) => info!("Screenshot salvato in {:?}", path),
         Err(e) => error!("Cannot write screenshot {:?}: {}", path, e),
     }
+}
+
+// Flags that take a value, so the value is never mistaken for the disc
+const VALUE_FLAGS: &[&str] = &[
+    "--rom",
+    "--frames",
+    "--dvc",
+    "--nvram",
+    "--board",
+    "--mouse-speed",
+    "--mouse-sensitivity",
+    "--screenshot-dir",
+    "--monitor",
+    "--video-levels",
+];
+
+// Disc = first positional argument, skipping flag values; --recent takes a value only when it is a number
+fn first_positional(args: &[String]) -> Option<String> {
+    let mut it = args.iter().peekable();
+    while let Some(a) = it.next() {
+        if VALUE_FLAGS.contains(&a.as_str()) {
+            it.next();
+        } else if a == "--recent" {
+            if it.peek().is_some_and(|n| n.parse::<usize>().is_ok()) {
+                it.next();
+            }
+        } else if !a.starts_with("--") {
+            return Some(a.clone());
+        }
+    }
+    None
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -375,11 +556,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rom_arg = flag_value("--rom").map(PathBuf::from);
     let max_frames: Option<u64> = flag_value("--frames").and_then(|s| s.parse().ok());
 
-    let board = flag_value("--board").map(|v| BoardKind::parse(&v).unwrap_or_else(|| {
-        eprintln!("--board takes mono1 or mono4");
-        std::process::exit(2);
-    }));
-
     if let Some(v) = flag_value("--video-levels") {
         match v.as_str() {
             "full" => opencdi::mcd212::set_studio_levels(false),
@@ -391,75 +567,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let board = flag_value("--board").map(|v| BoardKind::parse(&v).unwrap_or_else(|| {
+        eprintln!("--board takes mono1 or mono4");
+        std::process::exit(2);
+    }));
+
     let mut m = Machine::new();
     m.bus.slave.debug_log = has_flag("--slave-debug");
     if m.bus.slave.debug_log {
         info!("Debug Slave XBUS abilitato (--slave-debug): log byte CH0 (mouse)");
     }
 
-    // 1. Load BIOS ROM
-    let bios_path = match rom_arg.or_else(find_bios_rom) {
+    // 1. Load BIOS ROM (CLI --rom, saved config, auto-detect, or interactive guide)
+    let bios_path = match resolve_or_guide_bios(rom_arg.clone()) {
         Some(path) => path,
         None => {
-            let error_msg =
-                "OpenCDi - Required System BIOS Missing\n\
-                ======================================\n\n\
-                The emulator cannot start because no usable Philips CD-i system BIOS ROM was found (see the log).\n\n\
-                Recommended File:\n\
-                  • cdi220b.rom (512 KB, Philips CD-i 220 European PAL BIOS)\n\
-                    SHA-1: 53360A1F21DDAC952E95306CED64186A3FC0B93E\n\
-                    MD5:   AC0D468BE366779C9DF633BE98DA250A\n\n\
-                Alternative Supported BIOSes:\n\
-                  • cdi200.rom, cdi.rom, cdimono1.zip / cdibios.zip\n\
-                  • cdi220.rom is a truncated dump; cdi490a.rom is not emulated yet\n\n\
-                Where to place the BIOS ROM:\n\
-                  1. In a 'bios/' subfolder next to opencdi.exe\n\
-                  2. OR directly in the same folder as opencdi.exe\n\
-                  3. OR pass it on the command line: --rom <path>\n\n\
-                Digital Video Cartridge (DVC) for MPEG / FMV games:\n\
-                  • Place 'vmpega.rom' (256 KB) in 'dvc/', 'bios/', or next to opencdi.exe.";
-
-            error!("{}", error_msg);
-
-            #[cfg(target_os = "windows")]
-            unsafe {
-                use std::os::windows::ffi::OsStrExt;
-                let wide_text: Vec<u16> = std::ffi::OsStr::new(error_msg)
-                    .encode_wide()
-                    .chain(std::iter::once(0))
-                    .collect();
-                let wide_title: Vec<u16> = std::ffi::OsStr::new("OpenCDi - Required BIOS Missing")
-                    .encode_wide()
-                    .chain(std::iter::once(0))
-                    .collect();
-                MessageBoxW(
-                    std::ptr::null_mut(),
-                    wide_text.as_ptr(),
-                    wide_title.as_ptr(),
-                    0x0000_0000 | 0x0000_0010, // MB_OK | MB_ICONERROR
-                );
-            }
-            std::process::exit(1);
+            info!("OpenCDi exit: no system BIOS selected.");
+            std::process::exit(0);
         }
     };
-    match m.load_bios(&bios_path) {
-        Ok(r) if r.status == bios::Status::Ok => info!("Loaded system BIOS from {:?}: {}", bios_path, r.message),
-        Ok(r) => warn!("Loaded system BIOS from {:?} [{}]: {}", bios_path, r.status, r.message),
+    let bios_report = match m.load_bios(&bios_path) {
+        Ok(r) if r.status == bios::Status::Ok => {
+            info!("Loaded system BIOS from {:?}: {}", bios_path, r.message);
+            Some(r)
+        }
+        Ok(r) => {
+            warn!("Loaded system BIOS from {:?} [{}]: {}", bios_path, r.status, r.message);
+            Some(r)
+        }
         Err(e) => {
             error!("Cannot use system BIOS {:?}: {}", bios_path, e);
             eprintln!("Cannot use system BIOS {:?}: {}", bios_path, e);
             std::process::exit(1);
         }
+    };
+
+    let detected_board = if bios_report.as_ref().map_or(false, |r| r.board == Some(bios::Board::Mono4)) {
+        Some(BoardKind::Mono4)
+    } else {
+        Some(BoardKind::Mono1)
+    };
+    if let Some(b) = board.or(detected_board) {
+        m.bus.set_board(b);
     }
+    let available_bioses = find_all_available_bioses();
 
     if let Some(b) = board {
         m.bus.set_board(b);
     }
 
     // 2. Load NVRAM if present
-    let nvram_arg = args.iter().position(|a| a == "--nvram").and_then(|i| args.get(i + 1)).map(PathBuf::from);
+    let nvram_arg = flag_value("--nvram").map(PathBuf::from);
     let mono4_nvram = m.bus.mono4.is_some();
-    let resolved_nvram_path = nvram_arg.unwrap_or_else(if mono4_nvram { default_nvram490_save_path } else { default_nvram_save_path });
+    let resolved_nvram_path = nvram_arg.clone().unwrap_or_else(if mono4_nvram { default_nvram490_save_path } else { default_nvram_save_path });
     if let Some(m4) = m.bus.mono4.as_deref_mut() {
         match m4.nvram.attach_file(&resolved_nvram_path) {
             Ok(true) => info!("Mono-IV NVRAM loaded from {:?}", resolved_nvram_path),
@@ -468,22 +628,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else {
         m.bus.nvram.save_path = resolved_nvram_path.clone();
-    }
-    if m.bus.mono4.is_none() && resolved_nvram_path.is_file() {
-        if let Err(e) = m.bus.nvram.load_from_file(&resolved_nvram_path) {
-            log::warn!("Impossibile caricare NVRAM da {:?}: {:?}", resolved_nvram_path, e);
+        if resolved_nvram_path.is_file() {
+            if let Err(e) = m.bus.nvram.load_from_file(&resolved_nvram_path) {
+                log::warn!("Impossibile caricare NVRAM da {:?}: {:?}", resolved_nvram_path, e);
+            } else {
+                info!("NVRAM caricata da {:?}", resolved_nvram_path);
+            }
+        } else if nvram_arg.is_some() {
+            if let Err(e) = m.bus.nvram.save_to_file() {
+                log::warn!("Impossibile creare file iniziale NVRAM in {:?}: {:?}", resolved_nvram_path, e);
+            } else {
+                info!("Inizializzato nuovo file NVRAM in {:?}", resolved_nvram_path);
+            }
         } else {
-            info!("NVRAM caricata da {:?}", resolved_nvram_path);
+            info!("File NVRAM {:?} non presente: verrà creato automaticamente al salvataggio", resolved_nvram_path);
         }
     }
 
     // 2b. Load DVC ROM (Digital Video Cartridge) by default if present
     let dvc_disabled = has_flag("--no-dvc") || has_flag("--nodvc");
     let dvc_arg = flag_value("--dvc").map(PathBuf::from);
+    let mut resolved_dvc_path = None;
     if !dvc_disabled {
-        if let Some(dvc_path) = dvc_arg.clone().or_else(find_dvc_rom) {
-            if let Ok(_) = m.load_dvc(&dvc_path) {
+        let dvc_candidate = dvc_arg.clone()
+            .or_else(opencdi::frontend::load_saved_dvc)
+            .or_else(find_dvc_rom);
+        if let Some(dvc_path) = dvc_candidate {
+            if load_dvc_logged(&mut m, &dvc_path) {
                 info!("Loaded Digital Video Cartridge (DVC) ROM from {:?}", dvc_path);
+                resolved_dvc_path = Some(dvc_path);
             }
         } else {
             info!("No DVC ROM (vmpega.rom) found: booting in Base CD-i mode (MPEG video disabled).");
@@ -496,16 +669,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut current_game_name = "No disc inserted (Standalone BIOS)".to_string();
     // Disc = first positional argument (skipping flag values); --bios / --standalone force no disc
     let standalone = has_flag("--bios") || has_flag("--standalone");
-    let mut disc_arg = None;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if a == "--rom" || a == "--frames" || a == "--dvc" || a == "--board" || a == "--video-levels" || (a == "--recent" && recent_pick.is_some()) {
-            it.next();
-        } else if !a.starts_with("--") {
-            disc_arg = Some(a.clone());
-            break;
-        }
-    }
+    let mut disc_arg = first_positional(&args);
     if let Some(n) = recent_pick {
         disc_arg = opencdi::frontend::recent_images().get(n.wrapping_sub(1)).map(|p| p.to_string_lossy().to_string());
         if disc_arg.is_none() {
@@ -527,8 +691,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!("Loaded game disc at startup: {}", current_game_name);
 
                 let name_upper = current_game_name.to_uppercase();
-                let is_ntsc = (name_upper.contains("(USA)") || name_upper.contains("(JAPAN)") || name_upper.contains("NTSC"))
-                    && m.bus.cdrom.as_ref().map_or(true, |cd| cd.disc_type != 0x20);
+                let is_ntsc = m.bus.cdrom.as_ref().and_then(|cd| cd.is_ntsc_hint(&current_game_name))
+                    .unwrap_or_else(|| {
+                        (name_upper.contains("(USA)") || name_upper.contains("(JAPAN)") || name_upper.contains("NTSC"))
+                            && m.bus.cdrom.as_ref().map_or(true, |cd| cd.disc_type != 0x20)
+                    });
                 if is_ntsc {
                     info!("Detected NTSC disc (USA/Japan): auto-configured NTSC 60 Hz video mode");
                     m.bus.set_video_mode(VideoMode::Ntsc);
@@ -549,8 +716,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("CPU SCC68070 reset - PC: 0x{:08X}", m.cpu.pc);
 
     // 5. Initialize Controls Configuration
-    let bindings = KeyBindings::new();
-    let input_device_mode = if has_flag("--mouse") { InputDeviceMode::Mouse } else { InputDeviceMode::Gamepad };
+    let mut bindings = KeyBindings::new();
+    let mouse_sens_cli = flag_value("--mouse-speed")
+        .or_else(|| flag_value("--mouse-sensitivity"))
+        .and_then(|s| {
+            let clean = s.trim_end_matches('%');
+            clean.parse::<f32>().ok().map(|v| if v > 5.0 { v / 100.0 } else { v })
+        });
+    if let Some(sens) = mouse_sens_cli {
+        bindings.mouse_sensitivity = sens.clamp(0.05, 10.0);
+    }
+    let input_device_mode = if has_flag("--mouse") {
+        InputDeviceMode::Mouse
+    } else {
+        bindings.input_device
+    };
 
     // 6. Initialize Host Audio Playback
     let audio_ring: Arc<Mutex<VecDeque<Frame>>> = Arc::new(Mutex::new(VecDeque::with_capacity(audio::RING_CAP)));
@@ -563,10 +743,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("USB Gamepad subsystem active (Xbox / PlayStation / Generic USB)");
     }
 
-    m.bus.emulate_wait_states = true; // Authentic hardware wait-states
+    m.bus.emulate_wait_states = true; // Authentic hardware wait-states (15 MHz)
+    let start_fullscreen = has_flag("--fullscreen") || has_flag("-f");
+    let no_menu = has_flag("--no-menu") || has_flag("--nomenu");
+    let monitor_index: Option<usize> = flag_value("--monitor").and_then(|s| {
+        let n = s.parse().ok();
+        if n.is_none() {
+            log::warn!("--monitor {:?} is not a number, using the current monitor", s);
+        }
+        n
+    });
+    let screenshot_dir = flag_value("--screenshot-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("screenshots")))
+                .unwrap_or_else(|| PathBuf::from("screenshots"))
+        });
+
     let (pad_x, pad_y) = if m.bus.cdrom.is_some() { (575, 335) } else { (384, 280) };
     let prev_vsr = (m.bus.mcd212.get_vsr::<0>(), m.bus.mcd212.get_vsr::<1>());
     let now = Instant::now();
+    let frame_duration = m.bus.mcd212.video_mode.frame_duration();
     let mut app = App {
         m,
         bindings,
@@ -576,6 +775,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_frames,
         current_game_name,
         nvram_path: Some(resolved_nvram_path),
+        active_bios_path: bios_path.clone(),
+        available_bioses,
+        bios_report,
+        dvc_path: resolved_dvc_path,
+        start_fullscreen,
+        no_menu,
+        monitor_index,
+        screenshot_dir,
+        no_autoplay: has_flag("--no-autoplay"),
         window: None,
         surface: None,
         image_rect: (0, 0, SCREEN_WIDTH, SCREEN_HEIGHT),
@@ -595,10 +803,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rel_pointer: None,
         rel_over: (0.0, 0.0),
         mouse_left: false,
+        swallow_left: false,
+        mouse_left_latched: false,
         mouse_right: false,
+        mouse_right_latched: false,
         mouse_middle: false,
         prev_middle: false,
-        mouse_captured: true,
+        mouse_captured: start_fullscreen && no_menu,
         host_input: !has_flag("--no-host-input"),
         run_in_menu: has_flag("--run-in-menu"),
         in_modal_pump: false,
@@ -618,7 +829,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pad_y_f: pad_y as f32,
         prev_key_btn: 0,
         run_at: now,
-        next_frame_time: now,
+        next_frame_time: now + frame_duration,
         fps_timer: now,
         telemetry_frames: 0,
         paused_ticks: 0,
@@ -632,7 +843,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         measured_cd_rate: 0.0,
     };
 
-    info!("Emulation loop started. Shortcuts: [F11]/[Alt+Enter] Fullscreen, [F5]/[H] Reset, [P] Pause, [Space] hold Fast-forward, [F8] Screenshot (PPM), [F12] Screenshot (BMP), [F2]/[F4] Save/Load state, [F6]/[F7] State slot, [M] Mute, [+]/[-] Volume, [Ctrl+I] Insert Disc, [Ctrl+O] Open & Reset, [Middle Click] Capture/Release Mouse, [Esc] Quit");
+    info!("Emulation loop started. Shortcuts: [F11]/[Alt+Enter] Fullscreen, [F5]/[H] Reset, [P] Pause, [Space] hold Fast-forward, [F8]/[F12] Screenshot (PNG), [F2]/[F4] Save/Load state, [F6]/[F7] State slot, [M] Mute, [+]/[-] Volume, [L] Video levels studio/full, [Ctrl+I] Insert Disc, [Ctrl+O] Open & Reset, [Ctrl+B] Select BIOS, [Middle Click] Capture/Release Mouse, [Esc] Quit");
 
     let event_loop = EventLoop::new()?;
     event_loop.run_app(&mut app)?;
@@ -723,6 +934,14 @@ struct App {
     max_frames: Option<u64>,
     current_game_name: String,
     nvram_path: Option<PathBuf>,
+    active_bios_path: PathBuf,
+    available_bioses: Vec<(PathBuf, String)>,
+    bios_report: Option<bios::Report>,
+    dvc_path: Option<PathBuf>,
+    start_fullscreen: bool,
+    no_menu: bool,
+    monitor_index: Option<usize>,
+    screenshot_dir: PathBuf,
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     image_rect: (usize, usize, usize, usize),
@@ -742,10 +961,14 @@ struct App {
     rel_pointer: Option<(f64, f64)>,
     rel_over: (f64, f64), // raw mouse motion past the screen edge since the last frame, in CD-i pixels
     mouse_left: bool,
+    swallow_left: bool,
+    mouse_left_latched: bool,
     mouse_right: bool,
+    mouse_right_latched: bool,
     mouse_middle: bool,
     prev_middle: bool,
     mouse_captured: bool,
+    no_autoplay: bool,
     host_input: bool,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     run_in_menu: bool,
@@ -798,21 +1021,51 @@ impl App {
             .unwrap_or(std::ptr::null_mut())
     }
 
+    fn take_screenshot(&self) {
+        save_screenshot(&self.screenshot_dir, &self.current_game_name, self.frame_count, &self.m.bus.mcd212.framebuffer[..]);
+    }
+
+    fn set_fullscreen(&mut self, full: bool) {
+        if let Some(window) = &self.window {
+            if full {
+                // A maximised window is restored by the platform itself
+                if self.windowed.is_none() {
+                    self.windowed = Some((window.outer_position().ok(), window.inner_size())).filter(|_| !window.is_maximized());
+                }
+                let target_monitor = self.monitor_index.and_then(|idx| {
+                    let monitors: Vec<_> = window.available_monitors().collect();
+                    if idx > 0 && idx <= monitors.len() {
+                        Some(monitors[idx - 1].clone())
+                    } else if idx < monitors.len() {
+                        Some(monitors[idx].clone())
+                    } else {
+                        None
+                    }
+                });
+                window.set_fullscreen(Some(Fullscreen::Borderless(target_monitor)));
+                #[cfg(target_os = "windows")]
+                gui::set_menu_visible(self.hwnd(), false);
+            } else {
+                window.set_fullscreen(None);
+                #[cfg(target_os = "windows")]
+                if !self.no_menu {
+                    gui::set_menu_visible(self.hwnd(), true);
+                }
+                self.restore_check = None;
+                if self.windowed.is_some() {
+                    self.restore_windowed();
+                    // Window managers may apply their own geometry after the switch (seen under WINE): check once more
+                    self.restore_check = Some(Instant::now() + Duration::from_millis(300));
+                }
+            }
+            info!("Schermo intero: {}", if full { "SCHERMO INTERO" } else { "FINESTRA" });
+        }
+    }
+
     fn toggle_fullscreen(&mut self) {
         if let Some(window) = &self.window {
             let full = window.fullscreen().is_none();
-            if full {
-                // A maximised window is restored by the platform itself
-                self.windowed = Some((window.outer_position().ok(), window.inner_size())).filter(|_| !window.is_maximized());
-            }
-            window.set_fullscreen(if full { Some(Fullscreen::Borderless(None)) } else { None });
-            self.restore_check = None;
-            if !full && self.windowed.is_some() {
-                self.restore_windowed();
-                // Window managers may apply their own geometry after the switch (seen under WINE): check once more
-                self.restore_check = Some(Instant::now() + Duration::from_millis(300));
-            }
-            info!("Schermo intero: {}", if full { "SCHERMO INTERO" } else { "FINESTRA" });
+            self.set_fullscreen(full);
         }
     }
 
@@ -825,6 +1078,81 @@ impl App {
         if window.inner_size() != size {
             let _ = window.request_inner_size(size);
         }
+    }
+
+    fn switch_bios(&mut self, new_path: &Path) -> bool {
+        info!("Switching system BIOS to: {:?}", new_path);
+        let (entry, img) = match Machine::read_bios(new_path) {
+            Ok(res) => res,
+            Err(e) => {
+                error!("Cannot read BIOS file {:?}: {}", new_path, e);
+                #[cfg(target_os = "windows")]
+                gui::show_disc_error(self.hwnd(), &format!("Cannot read BIOS file:\n\n{:?}\n\nError: {}", new_path, e));
+                return false;
+            }
+        };
+
+        if img.report.status == bios::Status::Error {
+            error!("BIOS file {:?} is invalid: {}", new_path, img.report.message);
+            #[cfg(target_os = "windows")]
+            gui::show_disc_error(self.hwnd(), &format!("Selected BIOS file was rejected:\n\n{}", img.report.message));
+            return false;
+        }
+
+        let is_mono4 = img.report.board == Some(bios::Board::Mono4);
+        let target_board = if is_mono4 { BoardKind::Mono4 } else { BoardKind::Mono1 };
+
+        self.m.bus.set_board(target_board);
+        self.m.load_bios_image(&img);
+        let mut rep = img.report.clone();
+        if let Some(e) = entry {
+            rep.message = format!("{}: {}", e, rep.message);
+        }
+        info!("Loaded system BIOS from {:?} [{}]: {}", new_path, rep.status, rep.message);
+
+        // Configure NVRAM for the target board
+        let new_nvram = if is_mono4 { default_nvram490_save_path() } else { default_nvram_save_path() };
+        if let Some(m4) = self.m.bus.mono4.as_deref_mut() {
+            let _ = m4.nvram.attach_file(&new_nvram);
+        } else {
+            self.m.bus.nvram.save_path = new_nvram.clone();
+            if new_nvram.is_file() {
+                let _ = self.m.bus.nvram.load_from_file(&new_nvram);
+            }
+        }
+        self.nvram_path = Some(new_nvram);
+
+        // Load DVC ROM if enabled
+        if !self.dvc_disabled {
+            if let Some(dvc_p) = self.dvc_arg.clone().or_else(opencdi::frontend::load_saved_dvc).or_else(find_dvc_rom) {
+                if load_dvc_logged(&mut self.m, &dvc_p) {
+                    self.dvc_path = Some(dvc_p);
+                }
+            }
+        }
+
+        // Full console & CPU reset
+        self.m.bus.reset_system();
+        self.m.cpu.reset(&mut self.m.bus);
+        self.reset_state();
+        self.mouse_captured = false;
+        self.apply_grab();
+        self.m.bus.emulate_wait_states = true;
+        self.next_frame_time = Instant::now() + self.m.bus.mcd212.video_mode.frame_duration();
+        self.run_at = Instant::now();
+        self.reset_telemetry();
+
+        self.active_bios_path = new_path.to_path_buf();
+        self.bios_report = Some(rep);
+        opencdi::frontend::save_bios_preference(new_path);
+
+        #[cfg(target_os = "windows")]
+        {
+            gui::update_bios_menu(self.hwnd(), &self.active_bios_path, &self.available_bioses);
+            gui::update_dvc_menu(self.m.bus.dvc.is_fitted());
+            self.refresh_title();
+        }
+        true
     }
 
     fn reset_state(&mut self) {
@@ -840,7 +1168,7 @@ impl App {
     // Hide and confine the host cursor while captured and focused (Win32 ShowCursor/ClipCursor before)
     fn apply_grab(&mut self) {
         let Some(window) = &self.window else { return };
-        let want = self.host_input && self.focused && self.mouse_captured;
+        let want = self.host_input && self.focused && self.mouse_captured && self.input_device_mode == InputDeviceMode::Mouse;
         if self.grab_applied == Some(want) {
             return;
         }
@@ -947,6 +1275,7 @@ impl App {
             }
             Key::KeyI if ctrl => self.open_dialog_action(false),
             Key::KeyO if ctrl => self.open_dialog_action(true),
+            Key::KeyB if ctrl => push_action(GuiAction::OpenBiosDialog),
             Key::F5 => push_action(GuiAction::Reset),
             Key::KeyH if !ctrl && !self.bound(code) => push_action(GuiAction::Reset),
             Key::KeyP if !ctrl && !self.bound(code) => {
@@ -957,14 +1286,18 @@ impl App {
             }
             Key::F11 => self.toggle_fullscreen(),
             Key::Enter | Key::NumpadEnter if alt => self.toggle_fullscreen(),
-            Key::F8 => save_screenshot_ppm(self.frame_count, &self.m.bus.mcd212.framebuffer[..]),
-            Key::F12 => save_screenshot(self.frame_count, &self.m.bus.mcd212.framebuffer[..]),
+            Key::F8 | Key::F12 => self.take_screenshot(),
             Key::F2 => self.save_state(),
             Key::F4 => self.load_state(),
             Key::F6 | Key::F7 => {
                 self.state_slot = if code == Key::F6 { self.state_slot.saturating_sub(1) } else { (self.state_slot + 1).min(999) };
                 info!("State slot: {} ({:?})", self.state_slot, self.state_file());
                 self.refresh_title();
+            }
+            Key::KeyL if !ctrl && !self.bound(code) => {
+                let studio = !opencdi::mcd212::studio_levels();
+                opencdi::mcd212::set_studio_levels(studio);
+                info!("Video levels: {}", if studio { "studio (black 16)" } else { "full (black 0)" });
             }
             Key::KeyM if !self.bound(code) => {
                 self.muted = !self.muted;
@@ -986,6 +1319,22 @@ impl App {
                             self.current_game_name = opencdi::frontend::disc_display_name(&path);
                             self.add_recent(&path);
                             info!("New disc inserted successfully: {}", self.current_game_name);
+
+                            let name_upper = self.current_game_name.to_uppercase();
+                            let is_ntsc = self.m.bus.cdrom.as_ref().and_then(|cd| cd.is_ntsc_hint(&self.current_game_name))
+                                .unwrap_or_else(|| {
+                                    (name_upper.contains("(USA)") || name_upper.contains("(JAPAN)") || name_upper.contains("NTSC"))
+                                        && self.m.bus.cdrom.as_ref().map_or(true, |cd| cd.disc_type != 0x20)
+                                });
+                            let mode = if is_ntsc {
+                                info!("Detected NTSC disc: auto-configured NTSC 60 Hz video mode");
+                                VideoMode::Ntsc
+                            } else {
+                                VideoMode::Pal
+                            };
+                            self.m.bus.set_video_mode(mode);
+                            #[cfg(target_os = "windows")]
+                            gui::update_video_menu(mode);
                         }
                         Err(e) => {
                             error!("Failed to hot-swap disc {:?}: {:?}", path, e);
@@ -1004,7 +1353,7 @@ impl App {
 
                             if !self.dvc_disabled && !self.m.bus.dvc.is_fitted() {
                                 if let Some(dvc_path) = self.dvc_arg.clone().or_else(find_dvc_rom) {
-                                    if let Ok(_) = self.m.load_dvc(&dvc_path) {
+                                    if load_dvc_logged(&mut self.m, &dvc_path) {
                                         info!("Loaded Digital Video Cartridge (DVC) extension from {:?}", dvc_path);
                                         #[cfg(target_os = "windows")]
                                         gui::update_dvc_menu(true);
@@ -1013,8 +1362,11 @@ impl App {
                             }
 
                             let name_upper = self.current_game_name.to_uppercase();
-                            let is_ntsc = (name_upper.contains("(USA)") || name_upper.contains("(JAPAN)") || name_upper.contains("NTSC"))
-                                && self.m.bus.cdrom.as_ref().map_or(true, |cd| cd.disc_type != 0x20);
+                            let is_ntsc = self.m.bus.cdrom.as_ref().and_then(|cd| cd.is_ntsc_hint(&self.current_game_name))
+                                .unwrap_or_else(|| {
+                                    (name_upper.contains("(USA)") || name_upper.contains("(JAPAN)") || name_upper.contains("NTSC"))
+                                        && self.m.bus.cdrom.as_ref().map_or(true, |cd| cd.disc_type != 0x20)
+                                });
                             let mode = if is_ntsc {
                                 info!("Detected NTSC disc (USA/Japan): auto-configured NTSC 60 Hz video mode");
                                 VideoMode::Ntsc
@@ -1028,9 +1380,11 @@ impl App {
                             self.m.bus.reset_system();
                             self.m.cpu.reset(&mut self.m.bus);
                             self.reset_state();
-                            self.mouse_captured = true;
+                            self.mouse_captured = false;
+                            self.apply_grab();
                             self.m.bus.emulate_wait_states = true;
-                            self.next_frame_time = Instant::now();
+                            self.next_frame_time = Instant::now() + self.m.bus.mcd212.video_mode.frame_duration();
+                            self.run_at = Instant::now();
                             self.reset_telemetry();
                         }
                         Err(e) => {
@@ -1042,7 +1396,7 @@ impl App {
                 }
                 GuiAction::EjectDisc => {
                     info!("Ejecting disc from CD-i drive");
-                    self.m.bus.slave.set_disc_inserted(false);
+                    self.m.bus.slave.set_disc_inserted(false, false);
                     self.m.bus.cdrom = None;
                     self.disc_launched = false;
                     self.shell_ready_count = 0;
@@ -1051,15 +1405,19 @@ impl App {
                     self.pad_y = 280;
                     self.pad_x_f = 384.0;
                     self.pad_y_f = 280.0;
+                    self.mouse_captured = false;
+                    self.apply_grab();
                 }
                 GuiAction::Reset => {
                     info!("Console reset requested");
                     self.m.bus.reset_system();
                     self.m.cpu.reset(&mut self.m.bus);
                     self.reset_state();
-                    self.mouse_captured = true;
+                    self.mouse_captured = false;
+                    self.apply_grab();
                     self.m.bus.emulate_wait_states = true;
-                    self.next_frame_time = Instant::now();
+                    self.next_frame_time = Instant::now() + self.m.bus.mcd212.video_mode.frame_duration();
+                    self.run_at = Instant::now();
                     self.reset_telemetry();
                 }
                 GuiAction::Exit => {
@@ -1074,18 +1432,35 @@ impl App {
                 }
                 GuiAction::SetInputDevice(mode) => {
                     self.input_device_mode = mode;
+                    self.bindings.input_device = mode;
+                    self.bindings.save_to_ini();
+                    self.mouse_captured = mode == InputDeviceMode::Mouse;
+                    self.apply_grab();
                     #[cfg(target_os = "windows")]
                     gui::update_input_device_menu(mode);
                     info!("Input device mode set to: {:?}", mode);
+                }
+                GuiAction::SetMouseSensitivity(sens) => {
+                    self.bindings.mouse_sensitivity = sens;
+                    self.bindings.save_to_ini();
+                    #[cfg(target_os = "windows")]
+                    gui::update_mouse_sensitivity_menu(sens);
+                    info!("Sensibilità mouse impostata su: {:.0}% ({:.2})", sens * 100.0, sens);
                 }
                 GuiAction::ReloadControls => {
                     self.bindings.load_from_ini();
                     #[cfg(target_os = "windows")]
                     gui::update_profile_menu(self.bindings.profile);
-                    info!("Controls reloaded from INI file. Profile: {:?}", self.bindings.profile);
+                    #[cfg(target_os = "windows")]
+                    gui::update_input_device_menu(self.bindings.input_device);
+                    #[cfg(target_os = "windows")]
+                    gui::update_mouse_sensitivity_menu(self.bindings.mouse_sensitivity);
+                    self.input_device_mode = self.bindings.input_device;
+                    info!("Controls reloaded from INI file. Profile: {:?}, Device: {:?}, Sensitivity: {:.2}", self.bindings.profile, self.bindings.input_device, self.bindings.mouse_sensitivity);
                 }
                 GuiAction::ToggleReleaseMouse => {
                     self.mouse_captured = !self.mouse_captured;
+                    self.apply_grab();
                     info!("Mouse capture: {}", if self.mouse_captured { "CAPTURED" } else { "RELEASED" });
                 }
                 GuiAction::ToggleMute => {
@@ -1105,7 +1480,7 @@ impl App {
                     self.toggle_fullscreen();
                 }
                 GuiAction::TakeScreenshot => {
-                    save_screenshot(self.frame_count, &self.m.bus.mcd212.framebuffer[..]);
+                    self.take_screenshot();
                 }
                 GuiAction::SetVideoMode(mode) => {
                     self.m.bus.set_video_mode(mode);
@@ -1128,7 +1503,7 @@ impl App {
                         gui::update_dvc_menu(false);
                     } else {
                         if let Some(dvc_path) = self.dvc_arg.clone().or_else(find_dvc_rom) {
-                            if let Ok(_) = self.m.load_dvc(&dvc_path) {
+                            if load_dvc_logged(&mut self.m, &dvc_path) {
                                 info!("Inserted Digital Video Cartridge (DVC) from {:?}", dvc_path);
                                 #[cfg(target_os = "windows")]
                                 gui::update_dvc_menu(true);
@@ -1181,6 +1556,49 @@ impl App {
                     #[cfg(not(target_os = "windows"))]
                     let _ = std::process::Command::new("xdg-open").arg("https://github.com/sigsantilio/opencdi/issues").spawn();
                 }
+                GuiAction::OpenBiosDialog => {
+                    #[cfg(target_os = "windows")]
+                    gui::post_menu_command(self.hwnd(), gui::ID_BIOS_SELECT);
+                }
+                GuiAction::SelectBios(path) => {
+                    self.switch_bios(&path);
+                }
+                GuiAction::OpenBiosFolder => {
+                    let bios_dir = Path::new("bios");
+                    let _ = std::fs::create_dir_all(bios_dir);
+                    #[cfg(target_os = "windows")]
+                    gui::open_folder(bios_dir);
+                }
+                GuiAction::ShowBiosInfo => {
+                    #[cfg(target_os = "windows")]
+                    gui::show_bios_info(
+                        self.hwnd(),
+                        &self.active_bios_path,
+                        self.bios_report.as_ref(),
+                        self.m.bus.board,
+                        self.m.bus.dvc.is_fitted(),
+                        self.dvc_path.as_deref(),
+                    );
+                }
+                GuiAction::SelectDvc(path) => {
+                    info!("Loading user-selected DVC ROM: {:?}", path);
+                    if load_dvc_logged(&mut self.m, &path) {
+                        self.dvc_path = Some(path.clone());
+                        opencdi::frontend::save_dvc_preference(&path);
+                        #[cfg(target_os = "windows")]
+                        gui::update_dvc_menu(true);
+                        info!("DVC ROM loaded successfully: {:?}", path);
+                    } else {
+                        #[cfg(target_os = "windows")]
+                        gui::show_disc_error(self.hwnd(), &format!("The selected DVC ROM is invalid:\n\n{:?}", path));
+                    }
+                }
+                GuiAction::OpenDvcFolder => {
+                    let dvc_dir = if Path::new("dvc").is_dir() { Path::new("dvc") } else { Path::new("bios") };
+                    let _ = std::fs::create_dir_all(dvc_dir);
+                    #[cfg(target_os = "windows")]
+                    gui::open_folder(dvc_dir);
+                }
             }
         }
         true
@@ -1188,8 +1606,9 @@ impl App {
 
     fn autoplay(&mut self) {
         // Se un disco è presente, avvia automaticamente la riproduzione una sola volta quando la shell del BIOS è pronta
-        let m = &mut self.m;
-        if m.bus.cdrom.is_some() && !self.disc_launched {
+        let mut just_launched = false;
+        if self.m.bus.cdrom.is_some() && !self.disc_launched {
+            let m = &mut self.m;
             let (_effective_shell_base, shell_state) = if m.bus.dvc.is_fitted() {
                 let s_dvc = m.bus.peek_long(0x00D08090u32.wrapping_add(0xFFFF9172)).unwrap_or(0);
                 if s_dvc >= 2 {
@@ -1202,20 +1621,21 @@ impl App {
             };
 
             // The shell click targets the Mono-I shell; on the 490 the user clicks Play
-            if shell_state >= 2 && m.bus.mono4.is_none() {
+            if shell_state >= 2 && m.bus.mono4.is_none() && !self.no_autoplay {
                 self.shell_ready_count += 1;
-                if self.shell_ready_count == 1 || self.shell_ready_count == 150 {
-                    send_pointer(&mut m.bus, 575, 335, 0);
-                } else if self.shell_ready_count == 30 || self.shell_ready_count == 180 {
+                let phase = self.shell_ready_count % 60;
+                if phase == 1 {
                     info!("Shell BIOS pronta (stato {}): avvio automatico disco CD-i (click PLAY CD-I)...", shell_state);
                     send_pointer(&mut m.bus, 575, 335, 1);
-                } else if self.shell_ready_count == 50 || self.shell_ready_count == 200 {
+                } else if phase == 26 {
                     send_pointer(&mut m.bus, 575, 335, 0);
                 }
             }
             if ((m.cpu.pc >= 0x00010000 && m.cpu.pc < 0x00300000) || (m.cpu.pc >= 0x00D00000 && m.cpu.pc < 0x00E00000)) && self.frame_count > 250 {
                 info!("Applicazione disco in esecuzione in RAM (PC=0x{:06X}), controllo passato all'utente.", m.cpu.pc);
                 self.disc_launched = true;
+                self.mouse_captured = self.input_device_mode == InputDeviceMode::Mouse;
+                just_launched = true;
                 m.bus.emulate_wait_states = true;
                 self.pad_x = 384;
                 self.pad_y = 280;
@@ -1224,11 +1644,19 @@ impl App {
                 send_pointer(&mut m.bus, 384, 280, 0);
             }
         }
+        if just_launched {
+            self.apply_grab();
+        }
     }
 
     // Keyboard, gamepad and host mouse into the slave controller, once per emulated frame
     fn update_input(&mut self) {
         let is_active = self.focused && self.host_input;
+
+        let left_clicked = self.mouse_left || self.mouse_left_latched;
+        self.mouse_left_latched = false;
+        let right_clicked = self.mouse_right || self.mouse_right_latched;
+        self.mouse_right_latched = false;
 
         // Middle mouse button (rotellina/tasto centrale): toggle mouse capture / release focus
         if is_active && self.mouse_middle && !self.prev_middle {
@@ -1238,8 +1666,9 @@ impl App {
         self.prev_middle = self.mouse_middle;
 
         // Left click inside window re-captures mouse if released
-        if is_active && !self.mouse_captured && self.mouse_left && self.cursor.is_some() {
+        if is_active && !self.mouse_captured && left_clicked && self.cursor.is_some() && self.input_device_mode == InputDeviceMode::Mouse {
             self.mouse_captured = true;
+            self.swallow_left = true;
             info!("Controllo mouse: CATTURATO (focus console, puntatore host nascosto)");
         }
         self.apply_grab();
@@ -1356,8 +1785,9 @@ impl App {
                 (mouse_x, mouse_y) = cursor_to_cdi(pos, self.image_rect);
             }
             if self.rel_pointer.is_some() || self.cursor.is_some() {
-                if self.mouse_left { mouse_btn |= 1; }
-                if self.mouse_right { mouse_btn |= 2; }
+                self.swallow_left &= self.mouse_left;
+                if left_clicked && !self.swallow_left { mouse_btn |= 1; }
+                if right_clicked { mouse_btn |= 2; }
             }
         }
 
@@ -1373,8 +1803,8 @@ impl App {
             }
         }
 
-        if !self.disc_launched && m.bus.cdrom.is_some() && m.bus.mono4.is_none() {
-            // During automatic boot sequence, do not let host mouse drift override PLAY CD-I auto-click
+        if !self.disc_launched && m.bus.cdrom.is_some() && m.bus.mono4.is_none() && !self.no_autoplay && self.shell_ready_count < 240 {
+            // During automatic boot sequence, let autoplay pulse click PLAY CD-I until launched or timeout
         } else {
             match self.input_device_mode {
                 InputDeviceMode::Gamepad => {
@@ -1411,7 +1841,7 @@ impl App {
                     self.pad_y_f = mouse_y as f32;
                     send_pointer(&mut m.bus, self.pad_x, self.pad_y, mouse_btn | key_btn);
                     if let Some(m4) = m.bus.mono4.as_deref_mut() {
-                        m4.ikat.push_pointer(rel_over.0 as i32, rel_over.1 as i32);
+                        m4.ikat.push_pointer(self.rel_over.0 as i32, self.rel_over.1 as i32);
                     }
                 }
             }
@@ -1540,6 +1970,7 @@ impl App {
             return true;
         }
         self.autoplay();
+        self.update_input();
         self.m.run_frame();
         if self.frame_count % 300 == 0 {
             flush_nvram(&mut self.m.bus);
@@ -1550,8 +1981,6 @@ impl App {
             self.prev_vsr = curr_vsr;
             self.buffer_flips_interval += 1;
         }
-
-        self.update_input();
         // Emulation runs on the timer; only the picture is skipped while the window is hidden
         self.audio_buf.clear();
         self.m.drain_audio(&mut self.audio_buf);
@@ -1580,7 +2009,8 @@ impl App {
         true
     }
 
-    // Precision host frame pacing: frames start on a fixed schedule, a late frame drops the backlog
+    // Precision host frame pacing: frames start on a fixed schedule.
+    // If a frame completes late, advance to the next future target so the emulator NEVER bursts at host CPU speed.
     fn schedule_next(&mut self) {
         let target_frame_duration = self.m.bus.mcd212.video_mode.frame_duration();
         let now = Instant::now();
@@ -1588,9 +2018,15 @@ impl App {
             self.run_at = self.next_frame_time;
             self.next_frame_time += target_frame_duration;
         } else {
-            // Drop backlog immediately so emulation never bursts at host CPU speed
-            self.run_at = now;
-            self.next_frame_time = now + target_frame_duration;
+            // Late: if lag was large (>2 frames backlog e.g. window dragging/menu), resync cleanly
+            if now.duration_since(self.next_frame_time) > target_frame_duration * 2 {
+                self.next_frame_time = now + target_frame_duration;
+            } else {
+                while self.next_frame_time <= now {
+                    self.next_frame_time += target_frame_duration;
+                }
+            }
+            self.run_at = self.next_frame_time;
         }
     }
 
@@ -1671,16 +2107,32 @@ impl ApplicationHandler for App {
         #[cfg(target_os = "windows")]
         {
             gui::set_run_in_modal(self.run_in_menu);
-            gui::attach_gui_menu(self.hwnd(), self.bindings.profile, self.input_device_mode, self.m.bus.mcd212.video_mode);
+            let show_menu = !self.no_menu && !self.start_fullscreen;
+            gui::attach_gui_menu(
+                self.hwnd(),
+                self.bindings.profile,
+                self.input_device_mode,
+                self.m.bus.mcd212.video_mode,
+                self.bindings.mouse_sensitivity,
+                show_menu,
+                &self.active_bios_path,
+                &self.available_bioses,
+                self.m.bus.dvc.is_fitted(),
+            );
             gui::update_dvc_menu(self.m.bus.dvc.is_fitted());
             // SetMenu takes the menu bar out of the client area; winit adds it back when sizing
-            if let Some(window) = &self.window {
-                let _ = window.request_inner_size(LogicalSize::new(SCREEN_WIDTH as f64, SCREEN_HEIGHT as f64));
+            if show_menu {
+                if let Some(window) = &self.window {
+                    let _ = window.request_inner_size(LogicalSize::new(SCREEN_WIDTH as f64, SCREEN_HEIGHT as f64));
+                }
             }
+        }
+        if self.start_fullscreen {
+            self.set_fullscreen(true);
         }
         let now = Instant::now();
         self.run_at = now;
-        self.next_frame_time = now;
+        self.next_frame_time = now + self.m.bus.mcd212.video_mode.frame_duration();
         self.fps_timer = now;
     }
 
@@ -1734,8 +2186,18 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 let down = state == ElementState::Pressed;
                 match button {
-                    MouseButton::Left => self.mouse_left = down,
-                    MouseButton::Right => self.mouse_right = down,
+                    MouseButton::Left => {
+                        self.mouse_left = down;
+                        if down {
+                            self.mouse_left_latched = true;
+                        }
+                    }
+                    MouseButton::Right => {
+                        self.mouse_right = down;
+                        if down {
+                            self.mouse_right_latched = true;
+                        }
+                    }
                     MouseButton::Middle => self.mouse_middle = down,
                     _ => {}
                 }
@@ -1745,11 +2207,12 @@ impl ApplicationHandler for App {
     }
 
     fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
-        // Relative motion in host pixels, scaled like the letterboxed picture
+        // Relative motion in host pixels, scaled like the letterboxed picture and mouse sensitivity
         if let (DeviceEvent::MouseMotion { delta: (dx, dy) }, Some((x, y))) = (event, self.rel_pointer) {
             let (_, _, w, h) = self.image_rect;
             if w > 0 && h > 0 {
-                let (nx, ny) = (x + dx * SCREEN_WIDTH as f64 / w as f64, y + dy * SCREEN_HEIGHT as f64 / h as f64);
+                let sens = self.bindings.mouse_sensitivity as f64;
+                let (nx, ny) = (x + dx * sens * SCREEN_WIDTH as f64 / w as f64, y + dy * sens * SCREEN_HEIGHT as f64 / h as f64);
                 let x = nx.clamp(0.0, (SCREEN_WIDTH - 1) as f64);
                 let y = ny.clamp(0.0, (SCREEN_HEIGHT - 1) as f64);
                 self.rel_over = (self.rel_over.0 + nx - x, self.rel_over.1 + ny - y);
@@ -1767,6 +2230,11 @@ impl ApplicationHandler for App {
             self.fast_forward = ff;
             info!("Fast-forward: {}", if ff { "ON" } else { "OFF" });
             self.reset_telemetry();
+            if !ff {
+                let now = Instant::now();
+                self.run_at = now;
+                self.next_frame_time = now + self.m.bus.mcd212.video_mode.frame_duration();
+            }
         }
         let now = Instant::now();
         if !ff && now < self.run_at {
@@ -1828,6 +2296,49 @@ mod tests {
         assert_eq!(cursor_to_cdi(PhysicalPosition::new(100.0, 200.0), image_rect(768, 560)), (100, 200));
         assert_eq!(cursor_to_cdi(PhysicalPosition::new(219.0 + 1481.0, 1080.0), image_rect(1920, 1080)), (767, 559));
         assert_eq!(cursor_to_cdi(PhysicalPosition::new(0.0, 0.0), image_rect(1920, 1080)), (0, 0));
+    }
+
+    #[test]
+    fn disc_is_the_first_positional_after_flag_values() {
+        let v = |a: &[&str]| first_positional(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(v(&["--nvram", "/tmp/n.bin", "disc.cue"]), Some("disc.cue".into()));
+        assert_eq!(v(&["--rom", "b.rom", "--frames", "10", "--dvc", "d.rom", "disc.cue"]), Some("disc.cue".into()));
+        assert_eq!(v(&["disc.cue", "--nvram", "/tmp/n.bin"]), Some("disc.cue".into()));
+        assert_eq!(v(&["--recent", "2", "--mouse"]), None);
+        assert_eq!(v(&["--recent", "disc.cue"]), Some("disc.cue".into()));
+        assert_eq!(v(&["--mouse", "--bios"]), None);
+        assert_eq!(v(&["--mouse-speed", "0.5", "disc.cue"]), Some("disc.cue".into()));
+        assert_eq!(v(&["--mouse", "--mouse-speed", "0.5", "disc.cue", "--mouse-speed", "2"]), Some("disc.cue".into()));
+        assert_eq!(v(&["--screenshot-dir", "/tmp/shots", "disc.cue"]), Some("disc.cue".into()));
+        assert_eq!(v(&["disc.cue", "--screenshot-dir", "/tmp/shots"]), Some("disc.cue".into()));
+        assert_eq!(v(&["--monitor", "1", "disc.cue"]), Some("disc.cue".into()));
+        assert_eq!(v(&["--fullscreen", "--monitor", "0", "disc.cue"]), Some("disc.cue".into()));
+        assert_eq!(v(&["disc.cue", "--fullscreen", "--monitor", "1"]), Some("disc.cue".into()));
+        assert_eq!(v(&["--no-autoplay", "disc.cue"]), Some("disc.cue".into()));
+        assert_eq!(v(&["disc.cue", "--no-autoplay"]), Some("disc.cue".into()));
+    }
+
+    #[test]
+    fn screenshot_names_are_plain_ascii() {
+        assert_eq!(file_stem("Hotel Mario (Europe)"), "Hotel_Mario_Europe");
+        assert_eq!(file_stem("Zelda - The Wand [USA] & co.!"), "Zelda_-_The_Wand_USA_co");
+        assert_eq!(file_stem("Caf\u{e9}/x"), "Caf_x");
+        assert_eq!(file_stem("()"), "opencdi");
+    }
+
+    #[test]
+    fn screenshot_is_a_png_in_the_given_folder() {
+        let dir = std::env::temp_dir().join(format!("opencdi-shot-test-{}", std::process::id())).join("nested");
+        let fb = vec![0x00FF8040u32; SCREEN_WIDTH * SCREEN_HEIGHT];
+        save_screenshot(&dir, "Hotel Mario (Europe)", 7, &fb);
+        let data = std::fs::read(dir.join("Hotel_Mario_Europe_7.png")).unwrap();
+        assert_eq!(&data[..8], b"\x89PNG\r\n\x1a\n");
+        let mut rd = png::Decoder::new(std::io::Cursor::new(&data)).read_info().unwrap();
+        let mut buf = vec![0; rd.output_buffer_size().unwrap()];
+        let info = rd.next_frame(&mut buf).unwrap();
+        assert_eq!((info.width, info.height), (SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32));
+        assert_eq!(&buf[..3], &[0xFF, 0x80, 0x40]);
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 
     #[test]

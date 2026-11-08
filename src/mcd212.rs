@@ -1,12 +1,19 @@
-static STUDIO_LEVELS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Selects studio-level output (black 16, white 235 passed through, the default) instead of the full-range stretch.
+static STUDIO_LEVELS: AtomicBool = AtomicBool::new(true);
+
+/// Selects studio levels (black 16, white 235, passed through) or full range (16..235 stretched to 0..255).
 pub fn set_studio_levels(on: bool) {
-    STUDIO_LEVELS.store(on, std::sync::atomic::Ordering::Relaxed);
+    STUDIO_LEVELS.store(on, Ordering::Relaxed);
 }
 
 pub fn studio_levels() -> bool {
-    STUDIO_LEVELS.load(std::sync::atomic::Ordering::Relaxed)
+    STUDIO_LEVELS.load(Ordering::Relaxed)
+}
+
+/// Maps one studio-level component to the selected output range.
+pub fn level_out(v: i32, studio: bool) -> u32 {
+    if studio { v.clamp(0, 255) as u32 } else { (((v - 16) * 298 + 128) >> 8).clamp(0, 255) as u32 }
 }
 
 /// Maps a full-range component (0..255) onto studio levels (16..235) for fixed display colours.
@@ -528,9 +535,6 @@ impl Mcd212 {
             }
             0xC0 => {
                 if PATH == 0 {
-                    if self.image_coding_method != val {
-                        log::debug!(">>> [Scanline {}] ICMR changed from 0x{:08X} to 0x{:08X}", self.scanline, self.image_coding_method, val);
-                    }
                     self.image_coding_method = val;
                 }
             }
@@ -677,6 +681,24 @@ impl Mcd212 {
             240
         } else {
             280
+        }
+    }
+
+    #[inline(always)]
+    pub fn get_screen_width(&self) -> usize {
+        if (self.dcr[0] & DCR_CF_BIT) == 0 || (self.csrw[0] & CSR1W_ST_BIT) != 0 {
+            720
+        } else {
+            768
+        }
+    }
+
+    #[inline(always)]
+    pub fn get_border_width(&self) -> usize {
+        if (self.dcr[0] & DCR_CF_BIT) == 0 || (self.csrw[0] & CSR1W_ST_BIT) != 0 {
+            24
+        } else {
+            0
         }
     }
 
@@ -955,7 +977,7 @@ impl Mcd212 {
     pub fn process_vsr<const PATH: usize>(&mut self, pixels: &mut [u32; 768], transparent: &mut [bool; 768]) {
         let icm = self.get_icm::<PATH>();
         let tp_ctrl = self.get_transparency_control::<PATH>();
-        let width = 768;
+        let width = self.get_screen_width();
 
         let mut vsr = self.get_vsr::<PATH>();
         let _other_path = if PATH == 0 { 1 } else { 0 };
@@ -1147,13 +1169,20 @@ impl Mcd212 {
         }
 
         let order_ab = (self.plane_order & 1) == 0;
-        let width = 768;
+        let width = self.get_screen_width();
+        let border_width = self.get_border_width();
         let studio = studio_levels();
 
+        if border_width > 0 {
+            out[..border_width].fill(0xFF00_0000);
+            out[border_width + width..].fill(0xFF00_0000);
+        }
+
         for x in 0..width {
+            let dest_x = border_width + x;
             if transparent_a[x] && transparent_b[x] {
-                out[x] = if (self.image_coding_method & ((1 << 4) | (1 << 12) | (1 << 18))) != 0 {
-                    self.external_video_line[x]
+                out[dest_x] = if (self.image_coding_method & ((1 << 4) | (1 << 12) | (1 << 18))) != 0 {
+                    self.external_video_line[dest_x]
                 } else {
                     self.get_backdrop_plane()
                 };
@@ -1198,17 +1227,11 @@ impl Mcd212 {
             let mixed_g = (weighted_a_g + weighted_b_g + 16).clamp(0, 255);
             let mixed_b = (weighted_a_b + weighted_b_b + 16).clamp(0, 255);
 
-            let (out_r, out_g, out_b) = if studio {
-                (mixed_r as u32, mixed_g as u32, mixed_b as u32)
-            } else {
-                (
-                    (((mixed_r - 16) * 298 + 128) >> 8).clamp(0, 255) as u32,
-                    (((mixed_g - 16) * 298 + 128) >> 8).clamp(0, 255) as u32,
-                    (((mixed_b - 16) * 298 + 128) >> 8).clamp(0, 255) as u32,
-                )
-            };
+            let out_r = level_out(mixed_r, studio);
+            let out_g = level_out(mixed_g, studio);
+            let out_b = level_out(mixed_b, studio);
 
-            out[x] = 0xFF00_0000 | (out_r << 16) | (out_g << 8) | out_b;
+            out[dest_x] = 0xFF00_0000 | (out_r << 16) | (out_g << 8) | out_b;
         }
     }
 
@@ -1249,16 +1272,31 @@ impl Mcd212 {
     }
 
     pub fn render_scanline(&mut self, active_line: usize) {
-        let mut plane_a = [0u32; 768];
-        let mut plane_b = [0u32; 768];
-        let mut transparent_a = [false; 768];
-        let mut transparent_b = [false; 768];
-        let mut mixed_line = [0u32; 768];
+        let is_pal = self.video_mode == VideoMode::Pal && (self.dcr[0] & DCR_FD_BIT) == 0;
+        let mut draw_line = true;
+        if is_pal && (self.csrw[0] & CSR1W_ST_BIT) != 0 {
+            // In PAL with Standard Screen enabled, top 20 lines and bottom 20 lines are blank borders
+            if active_line < 20 || active_line >= (280 - 20) {
+                draw_line = false;
+            }
+        }
 
-        self.process_vsr::<0>(&mut plane_a, &mut transparent_a);
-        self.process_vsr::<1>(&mut plane_b, &mut transparent_b);
-        self.mix_lines(&plane_a, &transparent_a, &plane_b, &transparent_b, &mut mixed_line);
-        self.draw_cursor(self.scanline, &mut mixed_line);
+        self.csrr[0] |= CSR1R_DA;
+
+        let mut mixed_line = [0u32; 768];
+        if draw_line {
+            let mut plane_a = [0u32; 768];
+            let mut plane_b = [0u32; 768];
+            let mut transparent_a = [false; 768];
+            let mut transparent_b = [false; 768];
+
+            self.process_vsr::<0>(&mut plane_a, &mut transparent_a);
+            self.process_vsr::<1>(&mut plane_b, &mut transparent_b);
+            self.mix_lines(&plane_a, &transparent_a, &plane_b, &transparent_b, &mut mixed_line);
+            self.draw_cursor(self.scanline, &mut mixed_line);
+        } else {
+            mixed_line.fill(0xFF00_0000);
+        }
 
 
         let active_lines = self.effective_active_scanlines();
@@ -1358,6 +1396,18 @@ mod tests {
 #[cfg(test)]
 mod level_tests {
     use super::*;
+
+    #[test]
+    fn full_stretches_black_and_white() {
+        assert_eq!(level_out(16, false), 0);
+        assert_eq!(level_out(235, false), 255);
+    }
+
+    #[test]
+    fn studio_passes_values_through() {
+        assert_eq!(level_out(16, true), 16);
+        assert_eq!(level_out(235, true), 235);
+    }
 
     #[test]
     fn fixed_colors_map_to_studio_range() {

@@ -14,14 +14,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-// Looked up case-insensitively in the system directory and BIOS_SUBDIRS, in this order; Mono-IV images boot only with the opencdi_mono4 option on.
+// Looked up case-insensitively in the system directory, in this order; Mono-IV images boot only with the opencdi_mono4 option on.
 pub const BIOS_NAMES: &[&str] = &["cdi220b.rom", "cdi200.rom", "cdimono1.zip", "cdibios.zip", "cdi.rom", "cdi220.rom", "cdi490a.rom", "cdi490a.zip"];
 // Cartridge ROM, looked up the same way; cdimono1.zip carries vmpega.rom next to the system ROMs.
 pub const DVC_NAMES: &[&str] = &["vmpega.rom", "cdimono1.zip", "cdibios.zip"];
 // The IMPEG cartridge ROM, fitted only on the CD-i 490 (Mono-IV) board.
 pub const IMPEG_NAMES: &[&str] = &["impega.rom"];
-const BIOS_SUBDIRS: &[&str] = &[""];
 const MESSAGE_FRAMES: c_uint = 360;
+const AUDIO_RATE: u32 = opencdi::audio::OUT_RATE;
 // Room above the size measured at the first serialize_size call, for buffers that grow later (DVC decoder, FIFOs).
 const STATE_HEADROOM: usize = 4 << 20;
 const STATE_ALIGN: usize = 64 << 10;
@@ -200,13 +200,11 @@ fn show_message(msg: &str) {
 
 fn candidates(dir: &Path, names: &[&str]) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    for sub in BIOS_SUBDIRS {
-        let Ok(rd) = std::fs::read_dir(dir.join(sub)) else { continue };
-        let files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
-        for name in names {
-            let hit = |p: &&PathBuf| p.file_name().is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(name));
-            out.extend(files.iter().filter(hit).cloned());
-        }
+    let Ok(rd) = std::fs::read_dir(dir) else { return out };
+    let files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
+    for name in names {
+        let hit = |p: &&PathBuf| p.file_name().is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(name));
+        out.extend(files.iter().filter(hit).cloned());
     }
     out
 }
@@ -381,7 +379,7 @@ fn spill_to_temp(data: &[u8]) -> Result<PathBuf, String> {
 }
 
 fn fps(mode: VideoMode) -> f64 {
-    audio::frame_rate(mode)
+    opencdi::audio::frame_rate(mode)
 }
 
 fn region_of(mode: VideoMode) -> c_uint {
@@ -499,7 +497,7 @@ pub unsafe extern "C" fn retro_get_system_av_info(info: *mut retro_system_av_inf
                 max_height: SCREEN_HEIGHT as c_uint,
                 aspect_ratio: 4.0 / 3.0,
             },
-            timing: retro_system_timing { fps: fps(mode), sample_rate: audio::OUT_RATE as f64 },
+            timing: retro_system_timing { fps: fps(mode), sample_rate: AUDIO_RATE as f64 },
         };
         // SAFETY: frontend passes a writable `retro_system_av_info`.
         unsafe { info.write(v) };
@@ -883,6 +881,7 @@ mod tests {
         assert!(!POISONED.load(Ordering::SeqCst), "retro_deinit clears the poison");
     }
 
+    #[cfg(unix)]
     extern "C" fn unguarded() {
         panic!("unguarded panic in extern \"C\"");
     }

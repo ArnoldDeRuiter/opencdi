@@ -25,6 +25,11 @@ pub const ID_CONTROLS_INFO: usize = 1013;
 pub const ID_CONTROLS_RELEASE_MOUSE: usize = 1014;
 pub const ID_INPUT_DEVICE_GAMEPAD: usize = 1060;
 pub const ID_INPUT_DEVICE_MOUSE: usize = 1061;
+pub const ID_MOUSE_SENS_25: usize = 1090;
+pub const ID_MOUSE_SENS_50: usize = 1091;
+pub const ID_MOUSE_SENS_75: usize = 1092;
+pub const ID_MOUSE_SENS_100: usize = 1093;
+pub const ID_MOUSE_SENS_150: usize = 1094;
 
 pub const ID_AUDIO_MUTE: usize = 1020;
 pub const ID_AUDIO_VOL_UP: usize = 1021;
@@ -49,6 +54,12 @@ pub const ID_STATE_LOAD_BASE: usize = 1080; // 1080..1084 (Slots 1..5)
 
 pub const ID_RECENT_IMAGE_BASE: usize = 1200;
 pub const ID_RECENT_CLEAR: usize = 1210;
+pub const ID_BIOS_SELECT: usize = 1300;
+pub const ID_BIOS_OPEN_FOLDER: usize = 1301;
+pub const ID_BIOS_INFO: usize = 1302;
+pub const ID_DVC_SELECT: usize = 1303;
+pub const ID_DVC_OPEN_FOLDER: usize = 1304;
+pub const ID_BIOS_SWITCH_BASE: usize = 1310;
 pub use crate::frontend::MAX_RECENT_IMAGES;
 
 // Win32 Constants
@@ -80,11 +91,13 @@ const GWLP_WNDPROC: i32 = -4;
 
 const MB_OK: u32 = 0x0000_0000;
 const MB_YESNO: u32 = 0x0000_0004;
+#[allow(dead_code)]
 const MB_YESNOCANCEL: u32 = 0x0000_0003;
 const MB_ICONINFORMATION: u32 = 0x0000_0040;
 const MB_ICONQUESTION: u32 = 0x0000_0020;
 const MB_ICONWARNING: u32 = 0x0000_0030;
 const IDYES: i32 = 6;
+#[allow(dead_code)]
 const IDNO: i32 = 7;
 
 #[repr(C)]
@@ -233,6 +246,55 @@ static mut PREV_WNDPROC: isize = 0;
 static mut MENU_HANDLE: *mut std::ffi::c_void = std::ptr::null_mut();
 static mut OWNER_HWND: *mut std::ffi::c_void = std::ptr::null_mut();
 static mut RECENT_MENU_HANDLE: *mut std::ffi::c_void = std::ptr::null_mut();
+static mut BIOS_MENU_HANDLE: *mut std::ffi::c_void = std::ptr::null_mut();
+static mut DVC_MENU_HANDLE: *mut std::ffi::c_void = std::ptr::null_mut();
+static AVAILABLE_BIOSES: std::sync::Mutex<Vec<(PathBuf, String)>> = std::sync::Mutex::new(Vec::new());
+static ACTIVE_BIOS_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+pub fn rebuild_bios_menu_items(menu: *mut std::ffi::c_void) {
+    if menu.is_null() { return; }
+    unsafe {
+        let count = GetMenuItemCount(menu);
+        for _ in 0..count {
+            DeleteMenu(menu, 0, MF_BYPOSITION);
+        }
+        let list = AVAILABLE_BIOSES.lock().unwrap().clone();
+        let active = ACTIVE_BIOS_PATH.lock().unwrap().clone();
+        let active_canon = active.as_ref().and_then(|p| std::fs::canonicalize(p).ok());
+
+        for (idx, (p, label)) in list.iter().enumerate().take(20) {
+            let id = ID_BIOS_SWITCH_BASE + idx;
+            let is_active = active.as_ref().map_or(false, |a| a == p)
+                || active_canon.as_ref().map_or(false, |ac| {
+                    std::fs::canonicalize(p).ok().as_ref() == Some(ac)
+                });
+            let mut flags = MF_STRING;
+            if is_active {
+                flags |= MF_CHECKED;
+            }
+            AppendMenuW(menu, flags, id, to_wide(label).as_ptr());
+        }
+        if !list.is_empty() {
+            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+        }
+        AppendMenuW(menu, MF_STRING, ID_BIOS_SELECT, to_wide("Select Other BIOS ROM or ZIP...\tCtrl+B").as_ptr());
+        AppendMenuW(menu, MF_STRING, ID_BIOS_OPEN_FOLDER, to_wide("Open 'bios/' Folder in Explorer...").as_ptr());
+        AppendMenuW(menu, MF_STRING, ID_BIOS_INFO, to_wide("System BIOS & Hardware Info...").as_ptr());
+    }
+}
+
+pub fn update_bios_menu(hwnd: *mut std::ffi::c_void, active_path: &std::path::Path, available: &[(PathBuf, String)]) {
+    *AVAILABLE_BIOSES.lock().unwrap() = available.to_vec();
+    *ACTIVE_BIOS_PATH.lock().unwrap() = Some(active_path.to_path_buf());
+    unsafe {
+        if !BIOS_MENU_HANDLE.is_null() {
+            rebuild_bios_menu_items(BIOS_MENU_HANDLE);
+            if !hwnd.is_null() {
+                DrawMenuBar(hwnd);
+            }
+        }
+    }
+}
 
 pub fn rebuild_recent_menu_items(menu: *mut std::ffi::c_void) {
     if menu.is_null() { return; }
@@ -320,6 +382,22 @@ pub fn update_input_device_menu(mode: InputDeviceMode) {
                 ID_INPUT_DEVICE_MOUSE as u32,
                 MF_BYCOMMAND | if mode == InputDeviceMode::Mouse { MF_CHECKED } else { MF_UNCHECKED },
             );
+            if !OWNER_HWND.is_null() {
+                DrawMenuBar(OWNER_HWND);
+            }
+        }
+    }
+}
+
+pub fn update_mouse_sensitivity_menu(sens: f32) {
+    unsafe {
+        if !MENU_HANDLE.is_null() {
+            let is_close = |target: f32| (sens - target).abs() < 0.08;
+            CheckMenuItem(MENU_HANDLE, ID_MOUSE_SENS_25 as u32, MF_BYCOMMAND | if is_close(0.25) { MF_CHECKED } else { MF_UNCHECKED });
+            CheckMenuItem(MENU_HANDLE, ID_MOUSE_SENS_50 as u32, MF_BYCOMMAND | if is_close(0.50) { MF_CHECKED } else { MF_UNCHECKED });
+            CheckMenuItem(MENU_HANDLE, ID_MOUSE_SENS_75 as u32, MF_BYCOMMAND | if is_close(0.75) { MF_CHECKED } else { MF_UNCHECKED });
+            CheckMenuItem(MENU_HANDLE, ID_MOUSE_SENS_100 as u32, MF_BYCOMMAND | if is_close(1.00) { MF_CHECKED } else { MF_UNCHECKED });
+            CheckMenuItem(MENU_HANDLE, ID_MOUSE_SENS_150 as u32, MF_BYCOMMAND | if is_close(1.50) { MF_CHECKED } else { MF_UNCHECKED });
             if !OWNER_HWND.is_null() {
                 DrawMenuBar(OWNER_HWND);
             }
@@ -460,7 +538,39 @@ unsafe extern "system" fn custom_wndproc(
             push_action(GuiAction::LoadState(slot));
             return 0;
         }
+        if menu_id >= ID_BIOS_SWITCH_BASE && menu_id < ID_BIOS_SWITCH_BASE + 20 {
+            let idx = menu_id - ID_BIOS_SWITCH_BASE;
+            let list = AVAILABLE_BIOSES.lock().unwrap().clone();
+            if let Some((path, _)) = list.get(idx) {
+                push_action(GuiAction::SelectBios(path.clone()));
+            }
+            return 0;
+        }
         match menu_id {
+            ID_BIOS_SELECT => {
+                if let Some(path) = modal(hwnd, || open_bios_dialog(hwnd)) {
+                    push_action(GuiAction::SelectBios(path));
+                }
+                return 0;
+            }
+            ID_BIOS_OPEN_FOLDER => {
+                push_action(GuiAction::OpenBiosFolder);
+                return 0;
+            }
+            ID_BIOS_INFO => {
+                push_action(GuiAction::ShowBiosInfo);
+                return 0;
+            }
+            ID_DVC_SELECT => {
+                if let Some(path) = modal(hwnd, || open_dvc_dialog(hwnd)) {
+                    push_action(GuiAction::SelectDvc(path));
+                }
+                return 0;
+            }
+            ID_DVC_OPEN_FOLDER => {
+                push_action(GuiAction::OpenDvcFolder);
+                return 0;
+            }
             ID_STATE_QUICK_SAVE => {
                 push_action(GuiAction::SaveState(1));
                 return 0;
@@ -515,6 +625,26 @@ unsafe extern "system" fn custom_wndproc(
             }
             ID_INPUT_DEVICE_MOUSE => {
                 push_action(GuiAction::SetInputDevice(InputDeviceMode::Mouse));
+                return 0;
+            }
+            ID_MOUSE_SENS_25 => {
+                push_action(GuiAction::SetMouseSensitivity(0.25));
+                return 0;
+            }
+            ID_MOUSE_SENS_50 => {
+                push_action(GuiAction::SetMouseSensitivity(0.50));
+                return 0;
+            }
+            ID_MOUSE_SENS_75 => {
+                push_action(GuiAction::SetMouseSensitivity(0.75));
+                return 0;
+            }
+            ID_MOUSE_SENS_100 => {
+                push_action(GuiAction::SetMouseSensitivity(1.00));
+                return 0;
+            }
+            ID_MOUSE_SENS_150 => {
+                push_action(GuiAction::SetMouseSensitivity(1.50));
                 return 0;
             }
             ID_CONTROLS_EDIT_INI => {
@@ -623,7 +753,14 @@ pub fn attach_gui_menu(
     current_profile: InputProfile,
     current_device_mode: InputDeviceMode,
     current_video_mode: crate::mcd212::VideoMode,
+    current_mouse_sensitivity: f32,
+    show_menu: bool,
+    active_bios_path: &std::path::Path,
+    available_bioses: &[(PathBuf, String)],
+    dvc_fitted: bool,
 ) {
+    *AVAILABLE_BIOSES.lock().unwrap() = available_bioses.to_vec();
+    *ACTIVE_BIOS_PATH.lock().unwrap() = Some(active_bios_path.to_path_buf());
     if hwnd.is_null() {
         return;
     }
@@ -649,6 +786,22 @@ pub fn attach_gui_menu(
         AppendMenuW(file_menu, MF_POPUP, recent_menu as usize, to_wide("Recent Disc Images").as_ptr());
 
         AppendMenuW(file_menu, MF_STRING, ID_FILE_EJECT, to_wide("Eject Disc").as_ptr());
+
+        // Submenu: System BIOS
+        AppendMenuW(file_menu, MF_SEPARATOR, 0, std::ptr::null());
+        let bios_menu = CreatePopupMenu();
+        BIOS_MENU_HANDLE = bios_menu;
+        rebuild_bios_menu_items(bios_menu);
+        AppendMenuW(file_menu, MF_POPUP, bios_menu as usize, to_wide("System BIOS").as_ptr());
+
+        // Submenu: Digital Video Cartridge (DVC)
+        let dvc_menu = CreatePopupMenu();
+        DVC_MENU_HANDLE = dvc_menu;
+        let dvc_flag = if dvc_fitted { MF_STRING | MF_CHECKED } else { MF_STRING };
+        AppendMenuW(dvc_menu, dvc_flag, ID_EMU_DVC, to_wide("Enable Digital Video Cartridge (DVC)").as_ptr());
+        AppendMenuW(dvc_menu, MF_STRING, ID_DVC_SELECT, to_wide("Select DVC ROM (vmpega.rom / impega.rom)...").as_ptr());
+        AppendMenuW(dvc_menu, MF_STRING, ID_DVC_OPEN_FOLDER, to_wide("Open 'dvc/' / 'bios/' Folder in Explorer...").as_ptr());
+        AppendMenuW(file_menu, MF_POPUP, dvc_menu as usize, to_wide("Digital Video Cartridge (DVC)").as_ptr());
 
         let optical_drives = get_optical_drives();
         if !optical_drives.is_empty() {
@@ -719,6 +872,14 @@ pub fn attach_gui_menu(
         AppendMenuW(device_menu, MF_STRING, ID_INPUT_DEVICE_GAMEPAD, to_wide("CD-i Gamepad (USB Controller / Keyboard)\tF9").as_ptr());
         AppendMenuW(device_menu, MF_STRING, ID_INPUT_DEVICE_MOUSE, to_wide("Philips CD-i Mouse (Host Cursor)\tF9").as_ptr());
         AppendMenuW(controls_menu, MF_POPUP, device_menu as usize, to_wide("Input Device (Exclusive)").as_ptr());
+
+        let sens_menu = CreatePopupMenu();
+        AppendMenuW(sens_menu, MF_STRING, ID_MOUSE_SENS_25, to_wide("Very Low (25%)").as_ptr());
+        AppendMenuW(sens_menu, MF_STRING, ID_MOUSE_SENS_50, to_wide("Low (50% - Recommended)").as_ptr());
+        AppendMenuW(sens_menu, MF_STRING, ID_MOUSE_SENS_75, to_wide("Medium (75%)").as_ptr());
+        AppendMenuW(sens_menu, MF_STRING, ID_MOUSE_SENS_100, to_wide("Normal (100% Raw)").as_ptr());
+        AppendMenuW(sens_menu, MF_STRING, ID_MOUSE_SENS_150, to_wide("High (150%)").as_ptr());
+        AppendMenuW(controls_menu, MF_POPUP, sens_menu as usize, to_wide("Mouse Sensitivity").as_ptr());
         AppendMenuW(controls_menu, MF_SEPARATOR, 0, std::ptr::null());
 
         AppendMenuW(controls_menu, MF_STRING, ID_PROFILE_STANDARD, to_wide("Key Profile: Standard (Arrow Keys + Z / X)").as_ptr());
@@ -743,7 +904,7 @@ pub fn attach_gui_menu(
         // 4. Video Menu
         let video_menu = CreatePopupMenu();
         AppendMenuW(video_menu, MF_STRING, ID_VIDEO_FULLSCREEN, to_wide("Fullscreen\tF11 / Alt+Enter").as_ptr());
-        AppendMenuW(video_menu, MF_STRING, ID_VIDEO_SCREENSHOT, to_wide("Save Screenshot\tF12").as_ptr());
+        AppendMenuW(video_menu, MF_STRING, ID_VIDEO_SCREENSHOT, to_wide("Save Screenshot (PNG)\tF12").as_ptr());
         AppendMenuW(video_menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(video_menu, MF_STRING, ID_VIDEO_PAL, to_wide("PAL (50 Hz) [CD-i 220 Standard]").as_ptr());
         AppendMenuW(video_menu, MF_STRING, ID_VIDEO_NTSC, to_wide("NTSC (60 Hz)").as_ptr());
@@ -761,18 +922,39 @@ pub fn attach_gui_menu(
         // 6. Prominent Top-Level Send Feedback Button
         AppendMenuW(main_menu, MF_STRING, ID_HELP_FEEDBACK, to_wide("Send Feedback (F1)").as_ptr());
 
-        SetMenu(hwnd, main_menu);
-        DrawMenuBar(hwnd);
+        if show_menu {
+            SetMenu(hwnd, main_menu);
+            DrawMenuBar(hwnd);
+        } else {
+            SetMenu(hwnd, std::ptr::null_mut());
+        }
         set_window_icon(hwnd);
 
         update_input_device_menu(current_device_mode);
         update_profile_menu(current_profile);
         update_video_menu(current_video_mode);
+        update_mouse_sensitivity_menu(current_mouse_sensitivity);
 
         // Subclass window procedure
         let prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, custom_wndproc as *const () as usize as isize);
         PREV_WNDPROC = prev;
-        info!("Win32 Native Menu attached and window subclassed successfully.");
+        info!("Win32 Native Menu attached (visible={}) and window subclassed successfully.", show_menu);
+    }
+}
+
+pub fn set_menu_visible(hwnd: *mut std::ffi::c_void, visible: bool) {
+    if hwnd.is_null() {
+        return;
+    }
+    unsafe {
+        if visible {
+            if !MENU_HANDLE.is_null() {
+                SetMenu(hwnd, MENU_HANDLE);
+            }
+        } else {
+            SetMenu(hwnd, std::ptr::null_mut());
+        }
+        DrawMenuBar(hwnd);
     }
 }
 
@@ -833,8 +1015,10 @@ pub fn show_controls_dialog(owner: *mut std::ffi::c_void) {
            • Map any key (e.g. Space, Enter, Shift, etc.) in opencdi_controls.ini\n\n\
         MOUSE & TOUCH:\n\
            • Move host mouse to move the on-screen pointer or cursor.\n\
-           • Left Click = Button 1  |  Right Click = Button 2\n\
-           • Middle Click: Lock / release host mouse cursor to/from the window.\n\n\
+           • Left Click = Button 1 (also locks / captures mouse if released).\n\
+           • Right Click = Button 2\n\
+           • Middle Click: Lock / release host mouse cursor to/from the window.\n\
+           • Controls -> Mouse Sensitivity: adjust speed multiplier (25% - 150%).\n\n\
         USB GAMEPAD / XBOX / PLAYSTATION:\n\
            • D-Pad or Left Analog Stick = Movement\n\
            • Button A / Cross = Button 1\n\
@@ -846,10 +1030,11 @@ pub fn show_controls_dialog(owner: *mut std::ffi::c_void) {
            • F6: Quick Save State (Slot 1)  |  F7: Quick Load State (Slot 1)\n\
            • F9: Switch Active Input Device (Gamepad <-> Mouse)\n\
            • P: Pause  |  Space (hold): Fast-forward\n\
-           • F8: Screenshot (PPM)  |  F12: Screenshot (BMP)\n\
-           • F2 / F4: Save / Load state  |  F6 / F7: State slot\n\
+           • F2 / F4: Save / Load state  |  F6: Quick Save  |  F7: Quick Load\n\
+           • F8: Screenshot (BMP)  |  F12: Screenshot (PNG)\n\
            • Ctrl+I: Insert disc  |  Ctrl+O: Open disc image and restart\n\
            • M: Mute / Unmute audio  |  + / - : Adjust volume\n\
+           • L: Video levels studio (black 16) / full (black 0)\n\
            • Esc: Quit"
     );
     let title = to_wide("OpenCDi - Controls & Key Mapping Guide");
@@ -913,5 +1098,144 @@ pub fn show_nvram_cleared_dialog(owner: *mut std::ffi::c_void) {
     let title = to_wide("OpenCDi - Memory Cleared");
     unsafe {
         MessageBoxW(owner, text.as_ptr(), title.as_ptr(), MB_OK | MB_ICONINFORMATION);
+    }
+}
+
+pub fn open_bios_dialog(owner: *mut std::ffi::c_void) -> Option<PathBuf> {
+    let mut file_buf = [0u16; 1024];
+    let mut filter: Vec<u16> = Vec::new();
+    filter.extend(OsStr::new("CD-i BIOS Images (*.rom;*.bin;*.zip)").encode_wide());
+    filter.push(0);
+    filter.extend(OsStr::new("*.rom;*.bin;*.zip").encode_wide());
+    filter.push(0);
+    filter.extend(OsStr::new("All Files (*.*)").encode_wide());
+    filter.push(0);
+    filter.extend(OsStr::new("*.*").encode_wide());
+    filter.push(0);
+    filter.push(0);
+
+    let title = to_wide("Select Philips CD-i System BIOS ROM or ZIP");
+    let init_dir = if std::path::Path::new("bios").is_dir() {
+        Some(to_wide("bios"))
+    } else {
+        None
+    };
+
+    let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
+    ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = filter.as_ptr();
+    ofn.lpstrFile = file_buf.as_mut_ptr();
+    ofn.nMaxFile = file_buf.len() as u32;
+    ofn.lpstrTitle = title.as_ptr();
+    if let Some(ref d) = init_dir {
+        ofn.lpstrInitialDir = d.as_ptr();
+    }
+    ofn.Flags = 0x00000800 | 0x00001000 | 0x00000004 | 0x00000008;
+
+    unsafe {
+        if GetOpenFileNameW(&mut ofn) != 0 {
+            let len = file_buf.iter().position(|&c| c == 0).unwrap_or(file_buf.len());
+            let os_string = OsString::from_wide(&file_buf[..len]);
+            Some(PathBuf::from(os_string))
+        } else {
+            None
+        }
+    }
+}
+
+pub fn open_dvc_dialog(owner: *mut std::ffi::c_void) -> Option<PathBuf> {
+    let mut file_buf = [0u16; 1024];
+    let mut filter: Vec<u16> = Vec::new();
+    filter.extend(OsStr::new("CD-i Digital Video Cartridge ROM (*.rom;*.bin;*.zip)").encode_wide());
+    filter.push(0);
+    filter.extend(OsStr::new("*.rom;*.bin;*.zip").encode_wide());
+    filter.push(0);
+    filter.extend(OsStr::new("All Files (*.*)").encode_wide());
+    filter.push(0);
+    filter.extend(OsStr::new("*.*").encode_wide());
+    filter.push(0);
+    filter.push(0);
+
+    let title = to_wide("Select Digital Video Cartridge (DVC) ROM (vmpega.rom / impega.rom)");
+    let init_dir = if std::path::Path::new("dvc").is_dir() {
+        Some(to_wide("dvc"))
+    } else if std::path::Path::new("bios").is_dir() {
+        Some(to_wide("bios"))
+    } else {
+        None
+    };
+
+    let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
+    ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = filter.as_ptr();
+    ofn.lpstrFile = file_buf.as_mut_ptr();
+    ofn.nMaxFile = file_buf.len() as u32;
+    ofn.lpstrTitle = title.as_ptr();
+    if let Some(ref d) = init_dir {
+        ofn.lpstrInitialDir = d.as_ptr();
+    }
+    ofn.Flags = 0x00000800 | 0x00001000 | 0x00000004 | 0x00000008;
+
+    unsafe {
+        if GetOpenFileNameW(&mut ofn) != 0 {
+            let len = file_buf.iter().position(|&c| c == 0).unwrap_or(file_buf.len());
+            let os_string = OsString::from_wide(&file_buf[..len]);
+            Some(PathBuf::from(os_string))
+        } else {
+            None
+        }
+    }
+}
+
+pub fn open_folder(path: &std::path::Path) {
+    if !path.exists() {
+        let _ = std::fs::create_dir_all(path);
+    }
+    let path_str = path.to_string_lossy().to_string();
+    let _ = std::process::Command::new("explorer.exe").arg(&path_str).spawn();
+}
+
+pub fn show_bios_info(
+    owner: *mut std::ffi::c_void,
+    bios_path: &std::path::Path,
+    report: Option<&crate::bios::Report>,
+    board: crate::bus::BoardKind,
+    dvc_active: bool,
+    dvc_path: Option<&std::path::Path>,
+) {
+    let model_name = report.and_then(|r| r.known.map(|k| k.model)).unwrap_or("Unknown Philips CD-i System");
+    let sha1 = report.map(|r| r.sha1.as_str()).unwrap_or("N/A");
+    let status = report.map(|r| format!("{:?}", r.status)).unwrap_or_else(|| "Unknown".into());
+    let note = report.and_then(|r| r.known.map(|k| k.note)).unwrap_or("");
+    let board_str = match board {
+        crate::bus::BoardKind::Mono1 => "Mono-I (CD-i 205, 210, 220, 200)",
+        crate::bus::BoardKind::Mono4 => "Mono-IV (CD-i 450, 490, 910)",
+    };
+    let dvc_str = if dvc_active {
+        format!("Fitted & Active ({})", dvc_path.map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "Default cartridge".into()))
+    } else {
+        "Disabled / Not present".to_string()
+    };
+
+    let text = format!(
+        "OpenCDi - System BIOS & Hardware Information\n        =================================================\n\n        • Model: {}\n        • Architecture Board: {}\n        • Active File: {}\n        • Integrity Status: {}\n        • SHA-1 (CPU word order): {}\n        • Digital Video Cartridge (DVC): {}\n        {}\n        You can switch to another BIOS at any time via 'System BIOS -> Select Other BIOS ROM or ZIP' (Ctrl+B).",
+        model_name,
+        board_str,
+        bios_path.display(),
+        status,
+        sha1,
+        dvc_str,
+        if note.is_empty() { String::new() } else { format!("• Note: {}\n", note) },
+    );
+
+    unsafe {
+        MessageBoxW(
+            owner,
+            to_wide(&text).as_ptr(),
+            to_wide("OpenCDi - System BIOS Information").as_ptr(),
+            MB_OK | MB_ICONINFORMATION,
+        );
     }
 }

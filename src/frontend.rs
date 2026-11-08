@@ -146,6 +146,8 @@ pub fn string_to_key(s: &str) -> Option<Key> {
 #[derive(Debug, Clone)]
 pub struct KeyBindings {
     pub profile: InputProfile,
+    pub input_device: InputDeviceMode,
+    pub mouse_sensitivity: f32,
     pub up: Key,
     pub down: Key,
     pub left: Key,
@@ -158,6 +160,8 @@ impl KeyBindings {
     pub fn new() -> Self {
         let mut bindings = Self {
             profile: InputProfile::Standard,
+            input_device: InputDeviceMode::Gamepad,
+            mouse_sensitivity: 0.50,
             up: Key::ArrowUp,
             down: Key::ArrowDown,
             left: Key::ArrowLeft,
@@ -215,8 +219,16 @@ impl KeyBindings {
             InputProfile::Numpad => "Numpad",
             InputProfile::Custom => "Custom",
         };
+        let dev_str = match self.input_device {
+            InputDeviceMode::Gamepad => "Gamepad",
+            InputDeviceMode::Mouse => "Mouse",
+        };
         let content = format!(
             "# OpenCDi Controls Configuration\n\
+             # Input Device: Gamepad | Mouse (Exclusive active input device)\n\
+             input_device={}\n\
+             # Mouse sensitivity multiplier (0.50 = 50% recommended for modern high-DPI mice)\n\
+             mouse_sensitivity={:.2}\n\
              # Profile: Standard | WASD | Numpad | Custom\n\
              profile={}\n\n\
              # Custom key bindings (active with profile=Custom or as overrides):\n\
@@ -226,6 +238,8 @@ impl KeyBindings {
              right={}\n\
              btn1={}\n\
              btn2={}\n",
+            dev_str,
+            self.mouse_sensitivity,
             prof_str,
             key_to_string(self.up),
             key_to_string(self.down),
@@ -248,6 +262,17 @@ impl KeyBindings {
                 let parts: Vec<&str> = trimmed.split('=').map(|s| s.trim()).collect();
                 if parts.len() == 2 {
                     match parts[0].to_lowercase().as_str() {
+                        "input_device" => match parts[1].to_lowercase().as_str() {
+                            "mouse" => self.input_device = InputDeviceMode::Mouse,
+                            _ => self.input_device = InputDeviceMode::Gamepad,
+                        },
+                        "mouse_sensitivity" | "sensitivity" => {
+                            let clean = parts[1].trim_end_matches('%');
+                            if let Ok(val) = clean.parse::<f32>() {
+                                let factor = if val > 5.0 { val / 100.0 } else { val };
+                                self.mouse_sensitivity = factor.clamp(0.05, 10.0);
+                            }
+                        },
                         "profile" => match parts[1].to_lowercase().as_str() {
                             "wasd" => self.apply_profile(InputProfile::Wasd),
                             "numpad" => self.apply_profile(InputProfile::Numpad),
@@ -285,6 +310,7 @@ pub enum GuiAction {
     Exit,
     SetProfile(InputProfile),
     SetInputDevice(InputDeviceMode),
+    SetMouseSensitivity(f32),
     ReloadControls,
     ToggleReleaseMouse,
     ToggleMute,
@@ -303,6 +329,12 @@ pub enum GuiAction {
     LoadState(usize),
     ClearNvram,
     OpenFeedback,
+    SelectBios(PathBuf),
+    OpenBiosDialog,
+    OpenBiosFolder,
+    ShowBiosInfo,
+    SelectDvc(PathBuf),
+    OpenDvcFolder,
 }
 
 static PENDING_ACTIONS: Mutex<Vec<GuiAction>> = Mutex::new(Vec::new());
@@ -372,4 +404,90 @@ pub fn disc_display_name(path: &std::path::Path) -> String {
         Some(letter) => format!("Real Optical CD Drive ({}:)", letter),
         None => path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "CD-i Disc".to_string()),
     }
+}
+
+pub const CONFIG_FILE: &str = "opencdi.ini";
+
+pub fn load_saved_bios() -> Option<PathBuf> {
+    if let Ok(content) = std::fs::read_to_string(CONFIG_FILE) {
+        for line in content.lines().map(str::trim) {
+            if line.starts_with('#') || line.starts_with(';') { continue; }
+            if let Some((k, v)) = line.split_once('=') {
+                if k.trim().eq_ignore_ascii_case("bios_path") || k.trim().eq_ignore_ascii_case("bios") {
+                    let p = PathBuf::from(v.trim());
+                    if p.is_file() {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn save_bios_preference(path: &std::path::Path) {
+    let mut lines = Vec::new();
+    let mut found = false;
+    if let Ok(content) = std::fs::read_to_string(CONFIG_FILE) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if let Some((k, _)) = trimmed.split_once('=') {
+                if k.trim().eq_ignore_ascii_case("bios_path") || k.trim().eq_ignore_ascii_case("bios") {
+                    lines.push(format!("bios_path={}", path.display()));
+                    found = true;
+                    continue;
+                }
+            }
+            lines.push(line.to_string());
+        }
+    }
+    if !found {
+        if lines.is_empty() {
+            lines.push("# OpenCDi Emulator Configuration".to_string());
+        }
+        lines.push(format!("bios_path={}", path.display()));
+    }
+    let _ = std::fs::write(CONFIG_FILE, lines.join("\n") + "\n");
+}
+
+pub fn load_saved_dvc() -> Option<PathBuf> {
+    if let Ok(content) = std::fs::read_to_string(CONFIG_FILE) {
+        for line in content.lines().map(str::trim) {
+            if line.starts_with('#') || line.starts_with(';') { continue; }
+            if let Some((k, v)) = line.split_once('=') {
+                if k.trim().eq_ignore_ascii_case("dvc_path") || k.trim().eq_ignore_ascii_case("dvc") {
+                    let p = PathBuf::from(v.trim());
+                    if p.is_file() {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn save_dvc_preference(path: &std::path::Path) {
+    let mut lines = Vec::new();
+    let mut found = false;
+    if let Ok(content) = std::fs::read_to_string(CONFIG_FILE) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if let Some((k, _)) = trimmed.split_once('=') {
+                if k.trim().eq_ignore_ascii_case("dvc_path") || k.trim().eq_ignore_ascii_case("dvc") {
+                    lines.push(format!("dvc_path={}", path.display()));
+                    found = true;
+                    continue;
+                }
+            }
+            lines.push(line.to_string());
+        }
+    }
+    if !found {
+        if lines.is_empty() {
+            lines.push("# OpenCDi Emulator Configuration".to_string());
+        }
+        lines.push(format!("dvc_path={}", path.display()));
+    }
+    let _ = std::fs::write(CONFIG_FILE, lines.join("\n") + "\n");
 }

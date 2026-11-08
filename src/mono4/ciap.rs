@@ -1,7 +1,7 @@
 // CIAP disc and audio interface at 0x300000: RAM and program memory around a block of word registers at 0x2580.
 use super::Loud;
-use opencdi::audio::CdiAudio;
-use opencdi::cdrom::{CdRom, CD_SECTOR_RAW_SIZE};
+use crate::audio::CdiAudio;
+use crate::cdrom::{CdRom, CD_SECTOR_RAW_SIZE};
 
 /// Size of the CIAP window: RAM 0x0000-0x257F, registers 0x2580-0x25FF, program memory 0x2600-0x3FFF.
 pub const WINDOW_SIZE: usize = 0x4000;
@@ -72,7 +72,7 @@ fn header_valid(lba: u32, raw: &[u8; CD_SECTOR_RAW_SIZE]) -> bool {
 // Yellow Book scrambler pattern, generated once.
 fn scramble_table() -> &'static [u8; 2448] {
     static TABLE: std::sync::OnceLock<[u8; 2448]> = std::sync::OnceLock::new();
-    TABLE.get_or_init(opencdi::cdic::generate_sector_scramble)
+    TABLE.get_or_init(crate::cdic::generate_sector_scramble)
 }
 
 pub struct Ciap {
@@ -317,8 +317,18 @@ impl Ciap {
                 if self.loud.first(0x400 | reg) {
                     eprintln!("CIAP byte write to command reg {:02X}{} <- {:02X} pc~{:06X}", reg, if hi { "H" } else { "L" }, value, pc);
                 }
-                let cur = self.reg(reg);
-                self.write_reg(reg, (cur & !mask) | v, pc);
+                let merged = (self.reg(reg) & !mask) | v;
+                match reg {
+                    // A byte write stores the lane only; the command runs on a word write, and a copy starts only when the written lane sets bit 14
+                    REG_CCR => self.set(reg, merged),
+                    REG_DMACTL => {
+                        self.set(reg, merged);
+                        if v & 0x4000 != 0 {
+                            self.dma_request = Some(merged);
+                        }
+                    }
+                    _ => self.write_reg(reg, merged, pc),
+                }
             }
             _ => {
                 let cur = self.peek_reg(reg);
@@ -532,7 +542,7 @@ impl Ciap {
         self.set(REG_BMAN, bman & !(1 << i));
         self.set(REG_ISR, self.reg(REG_ISR) | ISR_AUDIO_DONE);
         self.set(REG_APTR, (at as u16 + 0x800) / 2);
-        (self.audio_wait, self.audio_next) = (opencdi::cdic::get_sector_count_for_coding(coding), i ^ 1);
+        (self.audio_wait, self.audio_next) = (crate::cdic::get_sector_count_for_coding(coding), i ^ 1);
         self.audio_buffers += 1;
         if self.trace {
             eprintln!("CIAP AUDIO buffer {} coding {:02X} played, next in {} periods", i, coding, self.audio_wait);
@@ -625,7 +635,7 @@ mod tests {
     #[test]
     fn drive_starts_late_and_stops_with_delivery_off() {
         let mut c = Ciap::default();
-        let period = opencdi::mcd212::VideoMode::Pal.cycles_per_sector();
+        let period = crate::mcd212::VideoMode::Pal.cycles_per_sector();
         c.drive(super::super::ikat::DriveEvent::Seek(13));
         c.tick(period, period, &mut None, &mut CdiAudio::new());
         assert!(c.drive_active && !c.drive_stopped);
@@ -674,7 +684,7 @@ mod tests {
     fn cpu_fed_audio_plays_queued_buffers_and_hands_them_back() {
         let mut c = Ciap::default();
         let mut audio = CdiAudio::new();
-        let period = opencdi::mcd212::VideoMode::Pal.cycles_per_sector();
+        let period = crate::mcd212::VideoMode::Pal.cycles_per_sector();
         c.write_reg(REG_ASHDW, 0x0800, 0);
         c.write_reg(REG_BMAN, 0x01, 0);
         c.write_reg(REG_BMAN, 0x02, 0);
@@ -720,7 +730,7 @@ mod tests {
 
     #[test]
     fn audio_stop_tacs_reset_and_state() {
-        let period = opencdi::mcd212::VideoMode::Pal.cycles_per_sector();
+        let period = crate::mcd212::VideoMode::Pal.cycles_per_sector();
         let mut audio = CdiAudio::new();
         let mut c = Ciap::default();
         c.write_reg(REG_BMAN, 0x03, 0);

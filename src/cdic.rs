@@ -310,6 +310,7 @@ impl Cdic {
                 if (self.data_buffer & 0x4000) == 0 {
                     self.cancel_disc_read();
                 }
+                self.update_interrupt();
             }
             _ => {}
         }
@@ -336,10 +337,10 @@ impl Cdic {
         self.cdda_playing = on;
     }
 
-    // ABUF interrupts only while AUDCTL bit 13 is set.
+    // ABUF interrupts only while AUDCTL bit 13 is set, XBUF only while DBUF bit 14 (disc read enabled) is set.
     fn update_interrupt(&mut self) {
         let abuf = (self.audio_buffer & 0x8000) != 0 && (self.z_buffer & 0x2000) != 0;
-        self.irq_pending = (self.x_buffer & 0x8000) != 0 || abuf;
+        self.irq_pending = ((self.x_buffer & 0x8000) != 0 && (self.data_buffer & 0x4000) != 0) || abuf;
     }
 
     fn lba_from_time(&self) -> u32 {
@@ -1075,6 +1076,17 @@ mod tests {
         assert!(!c.irq_pending);
         c.write_reg(0x3FA, 0x2000);
         assert!(c.irq_pending);
+    }
+
+    #[test]
+    fn clearing_dbuf_bit_14_drops_a_pending_sector_interrupt() {
+        let mut c = Cdic::new();
+        c.x_buffer = 0x8000;
+        c.write_reg(0x3FE, 0x4001);
+        assert!(c.irq_pending);
+        c.write_reg(0x3FE, 0x0001);
+        assert!(!c.irq_pending);
+        assert_eq!(c.read_reg(0x3F6), 0x8000);
     }
 
     #[test]

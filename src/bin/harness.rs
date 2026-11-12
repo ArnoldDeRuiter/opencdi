@@ -44,7 +44,7 @@ fn dump_ppm(fb: &[u32], path: &str) {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: harness <bios.rom> <disc|none> <frames> [--dvc <rom>] [--video-levels full|studio] [--ppm <out.ppm>] [--ntsc] [--autoplay [--print-autoplay-script]] [--input <script|@file>] [--sample <n> [--sample-audio]] [--dump-every <n> <prefix>] [--roundtrip <frame>] [--counters] [--idle-pc <hex>] [--board mono1|mono4] [--audio-out <file.s16>] [--nvram-in <file>] [--nvram-out <file>]");
+    eprintln!("usage: harness <bios.rom> <disc|none> <frames> [--dvc <rom>] [--video-levels full|studio] [--ppm <out.ppm>] [--ntsc] [--autoplay [--print-autoplay-script]] [--input <script|@file>] [--sample <n> [--sample-audio]] [--dump-every <n> <prefix>] [--roundtrip <frame>] [--counters] [--idle-pc <hex>] [--board mono1|mono4] [--audio-out <file.s16>] [--nvram-in <file>] [--nvram-out <file>] [--tray <frame>:eject|insert|swap,...]");
     std::process::exit(2);
 }
 
@@ -70,6 +70,7 @@ fn main() {
     let mut idle_pc: Option<u32> = None;
     let mut audio_out: Option<(String, Vec<u8>)> = None;
     let mut nvram_out: Option<&String> = None;
+    let mut tray: Vec<(u64, String)> = Vec::new();
     let mut nvram_in: Option<&String> = None;
     let mut i = 4;
     while i < a.len() {
@@ -87,6 +88,13 @@ fn main() {
             "--audio-out" => { i += 1; audio_out = Some((a.get(i).cloned().unwrap_or_else(|| usage()), Vec::new())); }
             "--nvram-in" => { i += 1; nvram_in = Some(a.get(i).unwrap_or_else(|| usage())); }
             "--nvram-out" => { i += 1; nvram_out = Some(a.get(i).unwrap_or_else(|| usage())); }
+            "--tray" => {
+                i += 1;
+                for item in a.get(i).unwrap_or_else(|| usage()).split(',') {
+                    let (f, act) = item.split_once(':').unwrap_or_else(|| usage());
+                    tray.push((f.parse().unwrap_or_else(|_| usage()), act.to_string()));
+                }
+            }
             "--ntsc" => ntsc = true,
             "--counters" => counters = true,
             "--board" => {
@@ -164,6 +172,17 @@ fn main() {
                 m.save_state(&[], &mut buf);
                 saved = Some((buf, disc_launched, shell_ready_count, player.clone()));
                 (video_all, audio_all, audio_samples, audio_nonzero) = (FNV_OFFSET, FNV_OFFSET, 0, 0);
+            }
+            for (_, act) in tray.iter().filter(|(f, _)| *f == frame) {
+                match act.as_str() {
+                    "eject" => {
+                        m.bus.slave.set_disc_inserted(false, false);
+                        m.bus.cdrom = None;
+                    }
+                    "insert" => m.bus.load_cdrom(disc).expect("insert disc"),
+                    "swap" => m.bus.change_disc(disc).expect("swap disc"),
+                    _ => usage(),
+                }
             }
             if autoplay && m.bus.cdrom.is_some() && !disc_launched {
                 let (bus, cpu) = (&mut m.bus, &m.cpu);

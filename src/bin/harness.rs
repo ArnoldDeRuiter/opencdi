@@ -44,7 +44,7 @@ fn dump_ppm(fb: &[u32], path: &str) {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: harness <bios.rom> <disc|none> <frames> [--dvc <rom>] [--video-levels full|studio] [--ppm <out.ppm>] [--ntsc] [--autoplay [--print-autoplay-script]] [--input <script|@file>] [--sample <n> [--sample-audio]] [--dump-every <n> <prefix>] [--roundtrip <frame>] [--counters] [--idle-pc <hex>] [--board mono1|mono4] [--audio-out <file.s16>] [--nvram-out <file>]");
+    eprintln!("usage: harness <bios.rom> <disc|none> <frames> [--dvc <rom>] [--video-levels full|studio] [--ppm <out.ppm>] [--ntsc] [--autoplay [--print-autoplay-script]] [--input <script|@file>] [--sample <n> [--sample-audio]] [--dump-every <n> <prefix>] [--roundtrip <frame>] [--counters] [--idle-pc <hex>] [--board mono1|mono4] [--audio-out <file.s16>] [--nvram-in <file>] [--nvram-out <file>]");
     std::process::exit(2);
 }
 
@@ -70,6 +70,7 @@ fn main() {
     let mut idle_pc: Option<u32> = None;
     let mut audio_out: Option<(String, Vec<u8>)> = None;
     let mut nvram_out: Option<&String> = None;
+    let mut nvram_in: Option<&String> = None;
     let mut i = 4;
     while i < a.len() {
         match a[i].as_str() {
@@ -84,6 +85,7 @@ fn main() {
             }
             "--ppm" => { i += 1; ppm = a.get(i); }
             "--audio-out" => { i += 1; audio_out = Some((a.get(i).cloned().unwrap_or_else(|| usage()), Vec::new())); }
+            "--nvram-in" => { i += 1; nvram_in = Some(a.get(i).unwrap_or_else(|| usage())); }
             "--nvram-out" => { i += 1; nvram_out = Some(a.get(i).unwrap_or_else(|| usage())); }
             "--ntsc" => ntsc = true,
             "--counters" => counters = true,
@@ -135,6 +137,11 @@ fn main() {
     }
     m.set_video_mode(if ntsc { VideoMode::Ntsc } else { VideoMode::Pal });
     m.reset();
+    if let Some(p) = nvram_in {
+        let data = std::fs::read(p).unwrap_or_else(|e| panic!("read nvram {}: {}", p, e));
+        let n = data.len().min(m.bus.nvram.ram.len());
+        m.bus.nvram.ram[..n].copy_from_slice(&data[..n]);
+    }
 
     let mut video_all = FNV_OFFSET;
     let mut audio_all = FNV_OFFSET;

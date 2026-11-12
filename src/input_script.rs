@@ -1,4 +1,4 @@
-// Shared pointer input script (harness and libretro test host); format in doc/handover/status-and-todo.md, "Phase 1 step 4".
+// Shared pointer input script for the harness: comma or newline separated `frame:x:y:buttons` and `frame:BUTTON:len` items.
 use std::fmt;
 
 pub const MAX_X: i32 = 767;

@@ -316,7 +316,7 @@ impl Cdic {
         }
     }
 
-    // Stop: the buffer playing finishes, unless the decoder holds an audio channel, then it stops at once without ABUF.
+// Stop: the buffer playing finishes, unless the decoder holds an audio channel, then it stops at once without ABUF.
     fn stop_audio_map(&mut self) {
         self.map_on = false;
         if self.dsp_achan != 0 {

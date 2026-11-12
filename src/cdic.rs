@@ -282,7 +282,7 @@ impl Cdic {
                     return;
                 }
                 // Bit 11 alone starts the map only with no audio channel; an empty map on an idle decoder ends at once with the finished flag.
-                let bit11_start = (val & 0x0800) != 0 && self.audio_channel == 0 && (val & 0x2000) == 0;
+                let bit11_start = (val & 0x0800) != 0 && (self.audio_channel == 0 || self.ram[0x2800 + 11] != 0xFF) && (val & 0x2000) == 0;
                 if bit11_start || (val & 0x2000) != 0 {
                     // A start while a map plays is ignored; over a stopped buffer still playing it waits for that buffer.
                     if !self.map_on {
@@ -337,10 +337,11 @@ impl Cdic {
         self.cdda_playing = on;
     }
 
-    // ABUF interrupts only while AUDCTL bit 13 is set, XBUF only while DBUF bit 14 (disc read enabled) is set.
+    // XBUF interrupts only while DBUF bit 14 (disc read enabled) is set; ABUF interrupts only while AUDCTL bit 13 is set.
     fn update_interrupt(&mut self) {
+        let xbuf = (self.x_buffer & 0x8000) != 0 && (self.data_buffer & 0x4000) != 0;
         let abuf = (self.audio_buffer & 0x8000) != 0 && (self.z_buffer & 0x2000) != 0;
-        self.irq_pending = ((self.x_buffer & 0x8000) != 0 && (self.data_buffer & 0x4000) != 0) || abuf;
+        self.irq_pending = xbuf || abuf;
     }
 
     fn lba_from_time(&self) -> u32 {
@@ -1079,17 +1080,6 @@ mod tests {
     }
 
     #[test]
-    fn clearing_dbuf_bit_14_drops_a_pending_sector_interrupt() {
-        let mut c = Cdic::new();
-        c.x_buffer = 0x8000;
-        c.write_reg(0x3FE, 0x4001);
-        assert!(c.irq_pending);
-        c.write_reg(0x3FE, 0x0001);
-        assert!(!c.irq_pending);
-        assert_eq!(c.read_reg(0x3F6), 0x8000);
-    }
-
-    #[test]
     fn a_stop_with_an_audio_channel_taken_over_by_command_2e_ends_the_buffer_at_once() {
         let mut c = Cdic::new();
         c.audio_channel = 0;
@@ -1115,6 +1105,16 @@ mod tests {
         assert!(!c.map_on);
         assert_eq!(c.read_reg(0x3FA), 0x0801);
         assert_eq!(c.read_reg(0x3FA), 0x0800);
+    }
+
+    #[test]
+    fn audctl_with_an_audio_channel_and_valid_map_starts_playback() {
+        let mut c = Cdic::new();
+        c.audio_channel = 1;
+        c.ram[0x2800 + 11] = 0x10;
+        c.write_reg(0x3FA, 0x0800);
+        assert!(c.map_on);
+        assert_eq!(c.buf_addr, 0x2800);
     }
 
     const CD_SECTOR: u32 = 200_000;
@@ -1183,5 +1183,16 @@ mod tests {
         c.write_reg(0x3FA, 0x0800);
         c.write_reg(0x3FE, 0x0000);
         assert!(!c.cdda_playing);
+    }
+
+    #[test]
+    fn clearing_dbuf_bit_14_drops_a_pending_sector_interrupt() {
+        let mut c = Cdic::new();
+        c.x_buffer = 0x8000;
+        c.write_reg(0x3FE, 0x4001);
+        assert!(c.irq_pending);
+        c.write_reg(0x3FE, 0x0001);
+        assert!(!c.irq_pending);
+        assert_eq!(c.read_reg(0x3F6), 0x8000);
     }
 }

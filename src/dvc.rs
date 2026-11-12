@@ -1308,7 +1308,6 @@ impl Dvc {
                     self.audio_armed = true;
                     self.audio_enabled = true;
                     self.or_fma_word(0x02, 0x0010);
-                    self.or_fma_word(FMA_ISR, 0x0010);
                 }
                 if value & 0x8000 != 0 { // DMA request Audio
                     self.dma_requested = true;
@@ -1504,6 +1503,7 @@ impl Dvc {
         if self.fma_demux.program_ends > 0 {
             trace!(">>> [DVC FMA] PROGRAM END (0xB9) IN AUDIO STREAM");
             self.or_fma_word(FMA_ISR, FMA_IRQ_EOI);
+            self.or_fma_word(0x02, FMA_IRQ_EOI);
             self.fma_demux.program_ends = 0;
         }
 
@@ -1563,7 +1563,16 @@ impl Dvc {
         let bits = std::mem::take(&mut self.fma_pending);
         if bits != 0 {
             self.or_fma_word(FMA_ISR, bits);
-            self.or_fma_word(0x02, bits & (FMA_IRQ_DEC | FMA_IRQ_UNF));
+            if (bits & FMA_IRQ_PLAY) != 0 {
+                self.or_fma_word(0x02, FMA_IRQ_PLAY);
+            }
+            if (bits & FMA_IRQ_DEC) != 0 {
+                self.or_fma_word(0x02, FMA_IRQ_DEC);
+            }
+            if (bits & FMA_IRQ_UNF) != 0 {
+                let stat = self.get_fma_word(0x02);
+                self.set_fma_word(0x02, (stat | FMA_IRQ_UNF) & !FMA_IRQ_PLAY);
+            }
         }
     }
 
@@ -2137,6 +2146,15 @@ mod timing_tests {
     }
 
     #[test]
+    fn play_arm_command_does_not_set_interrupt_in_isr() {
+        let mut d = Dvc::new();
+        d.set_fma_word(FMA_CMD, 0x0002);
+        d.handle_fma_write(FMA_CMD);
+        assert_eq!(d.get_fma_word(FMA_ISR) & FMA_IRQ_PLAY, 0, "PLAY ARM must not immediately trigger PLAY interrupt in ISR");
+        assert_ne!(d.get_fma_word(0x02) & FMA_IRQ_PLAY, 0, "PLAY ARM sets playback status bit in register 2");
+    }
+
+    #[test]
     fn a_due_frame_without_data_raises_underflow_and_makes_no_sound() {
         let mut d = dvc();
         feed(&mut d, &stream(90_000, Some(99_000), 1));
@@ -2168,6 +2186,22 @@ mod timing_tests {
             }
         }
         assert!(hits >= 5, "underflow repeats while the clock runs: {hits}");
+    }
+
+    #[test]
+    fn underflow_clears_playback_active_bit_in_status_register() {
+        let mut d = dvc();
+        feed(&mut d, &stream(90_000, Some(99_000), 1));
+        feed(&mut d, &pack(99_800, 3528));
+        tick(&mut d);
+        assert_ne!(d.get_fma_word(0x02) & FMA_IRQ_PLAY, 0, "Playback active bit must be set when decoding");
+
+        feed(&mut d, &pack(120_000, 3528));
+        feed(&mut d, &pack(140_000, 3528));
+        tick(&mut d);
+        let stat = d.get_fma_word(0x02);
+        assert_eq!(stat & FMA_IRQ_PLAY, 0, "Playback active bit 4 must be cleared on underflow");
+        assert_ne!(stat & FMA_IRQ_UNF, 0, "Underflow bit 3 must be set on underflow");
     }
 
     #[test]
